@@ -1,0 +1,242 @@
+// Package queue ports plexctl/queue.py: /playQueues create with server://
+// URIs and rollback, state-file queue resolution, and the size-delta
+// validated add path.
+package queue
+
+import (
+	"fmt"
+	"net/url"
+
+	"github.com/corinthian/plexctl/internal/api"
+	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/playback"
+	"github.com/corinthian/plexctl/internal/queuestate"
+)
+
+// flag01 renders a bool as the "1"/"0" query param PMS expects.
+func flag01(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+// rollbackQueue is a best-effort deletion of a partially-built play queue.
+// Never raises.
+func rollbackQueue(queueID string) {
+	_, _ = api.TryDelete("/playQueues/"+queueID, nil)
+}
+
+// Create mirrors queue.create (continuous=1 only for single-key seeds;
+// rollback + partialQueueID on mid-loop failure).
+func Create(ratingKeys []string, shuffle, repeat bool) jsonx.J {
+	serverID := playback.GetServerMachineID()
+	if serverID == "" {
+		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+	}
+
+	firstKey := ratingKeys[0]
+	uri := fmt.Sprintf("server://%s/com.plexapp.plugins.library/library/metadata/%s", serverID, firstKey)
+
+	// `continuous: 1` tells PMS to auto-fill the queue with the seed key's
+	// show siblings. That's the right UX for single-key "play this and keep
+	// going" intents, but for multi-key requests the user has explicitly
+	// picked the contents — PMS would auto-fill from the FIRST key and then
+	// the subsequent PUT-adds layer duplicates on top of the auto-fill.
+	// Verified 2026-05-13 against PMS 1.43.0.
+	continuous := "0"
+	if len(ratingKeys) == 1 {
+		continuous = "1"
+	}
+	params := url.Values{}
+	params.Set("type", "video")
+	params.Set("uri", uri)
+	params.Set("shuffle", flag01(shuffle))
+	params.Set("repeat", flag01(repeat))
+	params.Set("continuous", continuous)
+	data := api.Post("/playQueues", params)
+
+	mc := jsonx.GetMap(data, "MediaContainer")
+	queueID := mc["playQueueID"]
+	selectedID := mc["playQueueSelectedItemID"]
+
+	if !jsonx.Truthy(queueID) {
+		return jsonx.J{"ok": false, "error": "playQueue creation returned no playQueueID"}
+	}
+
+	for _, rk := range ratingKeys[1:] {
+		result := Add(jsonx.AsStr(queueID), rk)
+		if !jsonx.Truthy(result["ok"]) {
+			rollbackQueue(jsonx.AsStr(queueID))
+			result["partialQueueID"] = jsonx.AsStr(queueID)
+			result["rollbackAttempted"] = true
+			return result
+		}
+	}
+
+	if selectedID == nil {
+		return jsonx.J{"ok": false, "error": "playQueue created but PMS returned no playQueueSelectedItemID"}
+	}
+	return jsonx.J{"ok": true, "playQueueID": jsonx.AsStr(queueID), "selectedItemID": jsonx.AsStr(selectedID)}
+}
+
+// clientLabel mirrors queue._client_label.
+func clientLabel(client jsonx.J) string {
+	if v := client["name"]; jsonx.Truthy(v) {
+		return jsonx.AsStr(v)
+	}
+	if v := client["machineIdentifier"]; jsonx.Truthy(v) {
+		return jsonx.AsStr(v)
+	}
+	return "client"
+}
+
+// PMS exposes no server-side endpoint for discovering an active playQueueID
+// (verified against the OpenAPI 3.1.0 spec for PMS 1.2.0). The Companion
+// `/timeline/poll` endpoint that would return it rejects with HTTP 400 on
+// Apple TV 8.45. Instead, plexctl persists `(client_mid -> playQueueID)` to
+// disk on queue creation and reads it back here.
+func resolveQueueID(client jsonx.J) (string, jsonx.J) {
+	var entry jsonx.J
+	if mid := client["machineIdentifier"]; jsonx.Truthy(mid) {
+		entry = queuestate.Load(jsonx.AsStr(mid))
+	}
+	if entry != nil && jsonx.Truthy(entry["playQueueID"]) {
+		return jsonx.AsStr(entry["playQueueID"]), nil
+	}
+	return "", jsonx.J{"ok": false, "error": fmt.Sprintf("no active queue on %s", clientLabel(client))}
+}
+
+// Show mirrors queue.show (empty queue is ok:true, state empty). An
+// empty/missing queue is a valid state, not an error.
+func Show(client jsonx.J) jsonx.J {
+	qid, err := resolveQueueID(client)
+	if err != nil {
+		return jsonx.J{"ok": true, "state": "empty", "client": clientLabel(client), "items": []jsonx.J{}}
+	}
+	data := api.Get("/playQueues/"+qid, nil)
+	mc := jsonx.GetMap(data, "MediaContainer")
+	selectedID := mc["playQueueSelectedItemID"]
+	rawItems := jsonx.MapList(mc, "Metadata")
+	items := make([]jsonx.J, 0, len(rawItems))
+	for _, item := range rawItems {
+		items = append(items, jsonx.J{
+			"playQueueItemID": item["playQueueItemID"],
+			"title":           item["title"],
+			"type":            item["type"],
+			"year":            item["year"],
+			"duration":        item["duration"],
+			"selected":        item["playQueueItemID"] == selectedID,
+		})
+	}
+	if len(items) == 0 {
+		return jsonx.J{"ok": true, "state": "empty", "client": clientLabel(client), "items": []jsonx.J{}}
+	}
+	return jsonx.J{"ok": true, "playQueueID": qid, "selectedItemID": selectedID, "items": items}
+}
+
+// Shuffle mirrors queue.shuffle.
+func Shuffle(client jsonx.J) jsonx.J {
+	qid, err := resolveQueueID(client)
+	if err != nil {
+		return err
+	}
+	api.Put("/playQueues/"+qid+"/shuffle", nil)
+	return jsonx.J{"ok": true}
+}
+
+// Unshuffle mirrors queue.unshuffle.
+func Unshuffle(client jsonx.J) jsonx.J {
+	qid, err := resolveQueueID(client)
+	if err != nil {
+		return err
+	}
+	api.Put("/playQueues/"+qid+"/unshuffle", nil)
+	return jsonx.J{"ok": true}
+}
+
+// Clear mirrors queue.clear.
+func Clear(client jsonx.J) jsonx.J {
+	qid, err := resolveQueueID(client)
+	if err != nil {
+		return err
+	}
+	api.Delete("/playQueues/"+qid+"/items", nil)
+	if mid := client["machineIdentifier"]; jsonx.Truthy(mid) {
+		queuestate.Clear(jsonx.AsStr(mid))
+	}
+	return jsonx.J{"ok": true}
+}
+
+// RemoveItem mirrors queue.remove_item.
+func RemoveItem(client jsonx.J, itemID string) jsonx.J {
+	qid, err := resolveQueueID(client)
+	if err != nil {
+		return err
+	}
+	api.Delete("/playQueues/"+qid+"/items/"+itemID, nil)
+	return jsonx.J{"ok": true}
+}
+
+// Add mirrors queue.add (single PUT append to a known queue id).
+func Add(queueID, ratingKey string) jsonx.J {
+	serverID := playback.GetServerMachineID()
+	if serverID == "" {
+		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+	}
+
+	uri := fmt.Sprintf("server://%s/com.plexapp.plugins.library/library/metadata/%s", serverID, ratingKey)
+	params := url.Values{}
+	params.Set("uri", uri)
+	data := api.Put("/playQueues/"+queueID, params)
+	mc := jsonx.GetMap(data, "MediaContainer")
+	if jsonx.Truthy(mc["playQueueID"]) {
+		return jsonx.J{"ok": true}
+	}
+	return jsonx.J{"ok": false, "error": "add to queue returned unexpected response"}
+}
+
+// AddToClient mirrors queue.add_to_client (size-delta validation per key).
+//
+// The queue is resolved from the persisted (client_mid -> playQueueID)
+// state, same as Show/Clear/RemoveItem. No rollback on mid-loop failure —
+// the queue is user-managed state, not freshly created by this call, so
+// rolling back would clobber pre-existing items.
+//
+// PMS quirk: PUT /playQueues/{id}?uri=... returns 200 + a valid
+// MediaContainer even when the ratingKey doesn't exist (verified live
+// 2026-05-13 against PMS 1.43.0). The only reliable success signal is queue
+// size growth, so we re-read the queue after each add and bail with a clear
+// error when the size didn't move. Cost: one extra GET per add — acceptable
+// for the typical 1-3 keys / voice request.
+func AddToClient(client jsonx.J, ratingKeys []string) jsonx.J {
+	if len(ratingKeys) == 0 {
+		return jsonx.J{"ok": false, "error": "add requires at least one ratingKey"}
+	}
+	qid, err := resolveQueueID(client)
+	if err != nil {
+		return err
+	}
+	expected := int(jsonx.Num(jsonx.GetMap(api.Get("/playQueues/"+qid, nil), "MediaContainer")["size"]))
+	added := 0
+	for _, rk := range ratingKeys {
+		result := Add(qid, rk)
+		if !jsonx.Truthy(result["ok"]) {
+			result["added"] = added
+			result["playQueueID"] = qid
+			return result
+		}
+		expected++
+		actual := int(jsonx.Num(jsonx.GetMap(api.Get("/playQueues/"+qid, nil), "MediaContainer")["size"]))
+		if actual != expected {
+			return jsonx.J{
+				"ok":          false,
+				"error":       fmt.Sprintf("PMS accepted PUT but did not add ratingKey %s — likely unknown or invalid", rk),
+				"added":       added,
+				"playQueueID": qid,
+			}
+		}
+		added++
+	}
+	return jsonx.J{"ok": true, "added": added, "playQueueID": qid}
+}
