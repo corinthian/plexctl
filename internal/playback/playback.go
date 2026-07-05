@@ -200,7 +200,9 @@ func GetServerMachineID() string {
 		return ""
 	}
 	mc := jsonx.GetMap(data, "MediaContainer")
-	if v, ok := mc["machineIdentifier"]; ok {
+	if v, ok := mc["machineIdentifier"]; ok && jsonx.Truthy(v) {
+		// Truthy guard: an explicit null must read as missing (Python's
+		// .get() → None → falsy), not stringify into a garbage id.
 		return jsonx.AsStr(v)
 	}
 	return ""
@@ -238,7 +240,7 @@ func Seek(client jsonx.J, position string, unpause bool) jsonx.J {
 	rel := relSeekRe.FindStringSubmatch(position)
 	ts := tsSeekRe.FindStringSubmatch(position)
 	if rel == nil && ts == nil {
-		return jsonx.J{"ok": false, "error": fmt.Sprintf("unrecognised position format: '%s'", position)}
+		return jsonx.J{"ok": false, "error": fmt.Sprintf("unrecognised position format: %s", jsonx.PyRepr(position))}
 	}
 
 	if ts != nil {

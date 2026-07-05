@@ -49,8 +49,8 @@ func newPlaylistListCmd() *cobra.Command {
 		Short: "List all playlists, optionally filtered by type.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if playlistType != "" && !validPlaylistType(playlistType) {
-				return fmt.Errorf("invalid value for '--type': '%s' is not one of 'video', 'audio', 'photo'", playlistType)
+			if err := choiceError(cmd, "type", playlistType, "video", "audio", "photo"); err != nil {
+				return err
 			}
 			items, err := playlists.ListAll(playlistType)
 			if err != nil {

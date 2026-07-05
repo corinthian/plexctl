@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/clients"
 	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/playback"
@@ -101,8 +100,11 @@ func newPrevCmd() *cobra.Command {
 // ignore_unknown_options + allow_extra_args and takes POSITION as
 // nargs=-1/UNPROCESSED so tokens like "-30s" survive click's option parser.
 // Cobra has no direct equivalent, so flag parsing is disabled entirely and
-// the recognized flags (-c/--client, --no-unpause, --timeout) are hand-parsed
-// out of the raw args; everything else joins into POSITION.
+// the flags click recognizes here (-c/--client, --no-unpause, --help) are
+// hand-parsed out of the raw args; everything else — including --timeout,
+// which click only accepts at the group level, and -h, which click never
+// binds — joins into POSITION exactly as click would pass it through. A
+// bare "--" ends flag recognition for the rest of the args.
 func newSeekCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "seek POSITION",
@@ -115,14 +117,19 @@ POSITION formats: absolute mm:ss (e.g. 1:30), relative +Ns or -Ns (e.g. +30s, -1
 			var client string
 			noUnpause := false
 			var positionParts []string
+			flagsDone := false
 
 			for i := 0; i < len(args); i++ {
 				a := args[i]
+				if flagsDone {
+					positionParts = append(positionParts, a)
+					continue
+				}
 				switch {
-				case a == "-h" || a == "--help":
+				case a == "--help":
 					return cmd.Help()
 				case a == "--":
-					// bare separator — skip
+					flagsDone = true
 				case a == "-c" || a == "--client":
 					i++
 					if i >= len(args) {
@@ -133,23 +140,6 @@ POSITION formats: absolute mm:ss (e.g. 1:30), relative +Ns or -Ns (e.g. +30s, -1
 					client = strings.TrimPrefix(a, "--client=")
 				case a == "--no-unpause":
 					noUnpause = true
-				case a == "--timeout":
-					i++
-					if i >= len(args) {
-						return fmt.Errorf("flag needs an argument: --timeout")
-					}
-					t, err := strconv.ParseFloat(args[i], 64)
-					if err != nil {
-						return fmt.Errorf("invalid --timeout value: %s", args[i])
-					}
-					api.SetTimeoutOverride(t)
-				case strings.HasPrefix(a, "--timeout="):
-					raw := strings.TrimPrefix(a, "--timeout=")
-					t, err := strconv.ParseFloat(raw, 64)
-					if err != nil {
-						return fmt.Errorf("invalid --timeout value: %s", raw)
-					}
-					api.SetTimeoutOverride(t)
 				default:
 					positionParts = append(positionParts, a)
 				}

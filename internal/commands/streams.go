@@ -72,7 +72,7 @@ metadata chunk completes, so partial progress survives a killed caller.`,
 			}
 			result := showIdentity(jsonx.J{"ok": true, "count": len(rows), "audit": rows}, hit)
 			if len(rows) == 0 {
-				result["note"] = fmt.Sprintf("no episodes found for: '%s'", show)
+				result["note"] = fmt.Sprintf("no episodes found for: %s", jsonx.PyRepr(show))
 			}
 			output.Out(result)
 			return nil
@@ -198,10 +198,10 @@ func bulkSetAudio(show string, showRatingKey *string, language string, season *i
 			distinct[jsonx.AsStr(h["ratingKey"])] = true
 		}
 		if len(distinct) > 1 {
-			return jsonx.J{"ok": false, "error": fmt.Sprintf("ambiguous show '%s' — %d series match; pass --show-rating-key", show, len(distinct))}
+			return jsonx.J{"ok": false, "error": fmt.Sprintf("ambiguous show %s — %d series match; pass --show-rating-key", jsonx.PyRepr(show), len(distinct))}
 		}
 		if len(hits) == 0 {
-			return jsonx.J{"ok": false, "error": fmt.Sprintf("no show found for: '%s' — pass --show-rating-key", show)}
+			return jsonx.J{"ok": false, "error": fmt.Sprintf("no show found for: %s — pass --show-rating-key", jsonx.PyRepr(show))}
 		}
 		showKey = hits[0]["ratingKey"]
 		title = hits[0]["title"]
@@ -228,8 +228,8 @@ func bulkSetAudio(show string, showRatingKey *string, language string, season *i
 		if jsonx.Truthy(title) {
 			titleOrKey = jsonx.AsStr(title)
 		}
-		return jsonx.J{"ok": false, "error": fmt.Sprintf("'%s' spans %d seasons %s; pass --season N or --all-seasons",
-			titleOrKey, len(seasons), formatIntList(seasons))}
+		return jsonx.J{"ok": false, "error": fmt.Sprintf("%s spans %d seasons %s; pass --season N or --all-seasons",
+			jsonx.PyRepr(titleOrKey), len(seasons), formatIntList(seasons))}
 	}
 
 	plan := streams.PlanBulkAudio(episodes, language, onlyNonEng)

@@ -25,14 +25,6 @@ func init() {
 	})
 }
 
-func validMediaType(t string) bool {
-	switch t {
-	case "", "show", "movie", "episode":
-		return true
-	}
-	return false
-}
-
 func newSearchCmd() *cobra.Command {
 	var mediaType string
 	var asJSON bool
@@ -46,8 +38,8 @@ Use --type to restrict to show, movie, or episode. Use --json for full metadata.
 Use --min-score to control PMS relevance filtering (0 disables).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !validMediaType(mediaType) {
-				return fmt.Errorf("invalid value for '--type': '%s' is not one of 'show', 'movie', 'episode'", mediaType)
+			if err := choiceError(cmd, "type", mediaType, "show", "movie", "episode"); err != nil {
+				return err
 			}
 			query := args[0]
 			if strings.TrimSpace(query) == "" {
@@ -120,8 +112,8 @@ func newLibraryListCmd() *cobra.Command {
 		Short: "List items in a section, optionally filtered by type or watch status.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if mediaType != "" && mediaType != "show" && mediaType != "movie" {
-				return fmt.Errorf("invalid value for '--type': '%s' is not one of 'show', 'movie'", mediaType)
+			if err := choiceError(cmd, "type", mediaType, "show", "movie"); err != nil {
+				return err
 			}
 			items := library.ListSection(section, mediaType, unwatched, sortFlag)
 			output.Out(jsonx.J{"ok": true, "count": len(items), "items": items})
@@ -175,12 +167,12 @@ Use --key-only to resolve the ratingKey without starting playback.`,
 			item := library.LatestUnwatchedEpisode(query, unwatched)
 			if item == nil {
 				if unwatched {
-					output.Out(jsonx.J{"ok": false, "error": fmt.Sprintf("no unwatched episodes for: '%s'", query)})
+					output.Out(jsonx.J{"ok": false, "error": fmt.Sprintf("no unwatched episodes for: %s", jsonx.PyRepr(query))})
 					return nil
 				}
 				movies := library.Search(query, "movie", 1.0)
 				if len(movies) == 0 {
-					output.Out(jsonx.J{"ok": false, "error": fmt.Sprintf("nothing found for: '%s'", query)})
+					output.Out(jsonx.J{"ok": false, "error": fmt.Sprintf("nothing found for: %s", jsonx.PyRepr(query))})
 					return nil
 				}
 				item = movies[0]
@@ -284,7 +276,7 @@ only, --ndjson to stream line-delimited rows for batch callers.`,
 			}
 			result := showIdentity(jsonx.J{"ok": true, "count": len(rows), "episodes": rows}, hit)
 			if len(rows) == 0 {
-				result["note"] = fmt.Sprintf("no episodes found for: '%s'", show)
+				result["note"] = fmt.Sprintf("no episodes found for: %s", jsonx.PyRepr(show))
 			}
 			output.Out(result)
 			return nil

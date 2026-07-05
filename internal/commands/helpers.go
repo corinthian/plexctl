@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"iter"
 	"os"
 	"strconv"
@@ -10,6 +11,26 @@ import (
 
 	"github.com/corinthian/plexctl/internal/jsonx"
 )
+
+// choiceError mirrors click.Choice: when the flag was explicitly set
+// (including to ""), the value must be one of the choices or the command
+// fails with a usage error (exit 2 upstream). An unset flag keeps its
+// default and passes.
+func choiceError(cmd *cobra.Command, flag, value string, choices ...string) error {
+	if !cmd.Flags().Changed(flag) {
+		return nil
+	}
+	for _, c := range choices {
+		if value == c {
+			return nil
+		}
+	}
+	quoted := make([]string, len(choices))
+	for i, c := range choices {
+		quoted[i] = "'" + c + "'"
+	}
+	return fmt.Errorf("invalid value for '--%s': '%s' is not one of %s", flag, value, strings.Join(quoted, ", "))
+}
 
 // addClientFlag registers the --client/-c flag shared by nearly every
 // transport/session/queue command (cli.py's --client/-c option repeated on
