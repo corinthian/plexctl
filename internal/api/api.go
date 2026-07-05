@@ -164,8 +164,13 @@ func Request(method, base, path string, params url.Values, timeout float64) (any
 	if strings.TrimSpace(string(body)) == "" {
 		return jsonx.J{}, nil
 	}
+	// UseNumber keeps PMS number literals verbatim through the pass-through
+	// paths (9.0 stays 9.0, like Python's json round-trip), instead of
+	// float64's shortest-form re-rendering.
+	dec := json.NewDecoder(strings.NewReader(string(body)))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal(body, &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return nil, &Error{Message: "invalid JSON response: " + err.Error(), Kind: "error"}
 	}
 	return v, nil

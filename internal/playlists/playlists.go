@@ -1,0 +1,224 @@
+// Package playlists ports plexctl/playlists.py: account-level playlists with
+// playlistItemID mutation handles and the smart guard.
+//
+// PMS playlists are account-level (not bound to a single section). Smart
+// playlists are query-driven and reject mutation; callers are expected to
+// check the `smart` flag from ListAll before issuing edits.
+package playlists
+
+import (
+	"errors"
+	"fmt"
+	"net/url"
+
+	"github.com/corinthian/plexctl/internal/api"
+	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/playback"
+)
+
+var validTypes = map[string]bool{"audio": true, "video": true, "photo": true}
+
+// invalidPlaylistTypeMsg mirrors Python's f"playlist_type must be one of
+// {sorted(_VALID_TYPES)}" — sorted({"audio","video","photo"}) is
+// alphabetical.
+const invalidPlaylistTypeMsg = "playlist_type must be one of ['audio', 'photo', 'video']"
+
+const smartRefusal = "smart playlist: contents are query-driven and cannot be edited via " +
+	"the API — edit the smart filter in the Plex app instead"
+
+func uriFor(serverID, ratingKey string) string {
+	return fmt.Sprintf("server://%s/com.plexapp.plugins.library/library/metadata/%s", serverID, ratingKey)
+}
+
+// isSmart is a best-effort smart-playlist check. Returns false on lookup
+// failure so the real mutation surfaces the canonical error rather than this
+// probe.
+//
+// PMS 1.43 silently 2xx-no-ops mutations against smart playlists in at least
+// one verified path (smart collection add — same module pattern). Guard is
+// defense-in-depth against the JSON `ok: true` contract lying.
+func isSmart(playlistKey string) bool {
+	r, err := api.TryGet(fmt.Sprintf("/playlists/%s", playlistKey), nil)
+	if err != nil {
+		return false
+	}
+	items := jsonx.MapList(jsonx.GetMap(r, "MediaContainer"), "Metadata")
+	if len(items) == 0 {
+		return false
+	}
+	return jsonx.Truthy(items[0]["smart"])
+}
+
+// ListAll mirrors playlists.list_all; the error mirrors its ValueError on a
+// bad type (the CLI converts it to the standard envelope). playlistType == ""
+// means unfiltered.
+func ListAll(playlistType string) ([]jsonx.J, error) {
+	params := url.Values{}
+	if playlistType != "" {
+		if !validTypes[playlistType] {
+			return nil, errors.New(invalidPlaylistTypeMsg)
+		}
+		params.Set("playlistType", playlistType)
+	}
+	resp := api.Get("/playlists", params)
+	items := jsonx.MapList(jsonx.GetMap(resp, "MediaContainer"), "Metadata")
+	rows := make([]jsonx.J, 0, len(items))
+	for _, i := range items {
+		rows = append(rows, jsonx.J{
+			"ratingKey":    i["ratingKey"],
+			"title":        i["title"],
+			"playlistType": i["playlistType"],
+			"smart":        jsonx.Truthy(i["smart"]),
+			"leafCount":    i["leafCount"],
+			"duration":     i["duration"],
+		})
+	}
+	return rows, nil
+}
+
+// Show mirrors playlists.show: return the items in a playlist.
+func Show(ratingKey string) []jsonx.J {
+	resp := api.Get(fmt.Sprintf("/playlists/%s/items", ratingKey), nil)
+	items := jsonx.MapList(jsonx.GetMap(resp, "MediaContainer"), "Metadata")
+	rows := make([]jsonx.J, 0, len(items))
+	for _, i := range items {
+		viewCount, ok := i["viewCount"]
+		if !ok {
+			viewCount = 0
+		}
+		rows = append(rows, jsonx.J{
+			"playlistItemID": i["playlistItemID"],
+			"ratingKey":      i["ratingKey"],
+			"title":          i["title"],
+			"type":           i["type"],
+			"year":           i["year"],
+			"duration":       i["duration"],
+			"viewCount":      viewCount,
+		})
+	}
+	return rows
+}
+
+// --- mutations ---------------------------------------------------------------
+
+// Create mirrors playlists.create: create a manual playlist seeded with
+// ratingKeys.
+//
+// Smart playlists are not supported — they require a search URI and are
+// rarely needed from a voice interface. POSTs the first item, then PUTs each
+// remaining key. On a mid-loop add failure the partial playlist is deleted
+// best-effort and the error dict carries partialPlaylistID /
+// rollbackAttempted: true so the caller can surface what server-side state
+// existed.
+func Create(title, playlistType string, ratingKeys []string) jsonx.J {
+	if len(ratingKeys) == 0 {
+		return jsonx.J{"ok": false, "error": "create requires at least one ratingKey"}
+	}
+	if !validTypes[playlistType] {
+		return jsonx.J{"ok": false, "error": invalidPlaylistTypeMsg}
+	}
+	serverID := playback.GetServerMachineID()
+	if serverID == "" {
+		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+	}
+
+	data := api.Post("/playlists", url.Values{
+		"title": {title},
+		"type":  {playlistType},
+		"smart": {"0"},
+		"uri":   {uriFor(serverID, ratingKeys[0])},
+	})
+	items := jsonx.MapList(jsonx.GetMap(data, "MediaContainer"), "Metadata")
+	if len(items) == 0 {
+		return jsonx.J{"ok": false, "error": "playlist creation returned no metadata"}
+	}
+	playlistKey := items[0]["ratingKey"]
+	if !jsonx.Truthy(playlistKey) {
+		return jsonx.J{"ok": false, "error": "playlist creation returned no ratingKey"}
+	}
+	key := jsonx.AsStr(playlistKey)
+
+	for _, rk := range ratingKeys[1:] {
+		r := addItemsFn(key, []string{rk}, serverID, true)
+		if !jsonx.Truthy(r["ok"]) {
+			_, _ = api.TryDelete(fmt.Sprintf("/playlists/%s", key), nil)
+			r["partialPlaylistID"] = key
+			r["rollbackAttempted"] = true
+			return r
+		}
+	}
+
+	return jsonx.J{"ok": true, "ratingKey": key, "title": title, "count": len(ratingKeys)}
+}
+
+// Delete mirrors playlists.delete. Allowed on smart playlists — deletion is
+// unambiguous.
+func Delete(playlistKey string) jsonx.J {
+	api.Delete(fmt.Sprintf("/playlists/%s", playlistKey), nil)
+	return jsonx.J{"ok": true}
+}
+
+// Rename mirrors playlists.rename. Refuses smart playlists.
+func Rename(playlistKey, newTitle string) jsonx.J {
+	if isSmart(playlistKey) {
+		return jsonx.J{"ok": false, "error": smartRefusal}
+	}
+	api.Put(fmt.Sprintf("/playlists/%s", playlistKey), url.Values{"title": {newTitle}})
+	return jsonx.J{"ok": true}
+}
+
+// addItemsFn is a seam so Create's mid-loop rollback path can be exercised
+// without a real HTTP failure: with trustManual=true, a resolved serverID,
+// and a single-key slice, addItemsInternal has no real failure path (api.Put
+// print-and-exits rather than returning ok:false), mirroring the Python test
+// suite's monkeypatch of add_items itself. Production always calls through
+// addItemsInternal unchanged.
+var addItemsFn = addItemsInternal
+
+func addItemsInternal(playlistKey string, ratingKeys []string, serverID string, trustManual bool) jsonx.J {
+	if len(ratingKeys) == 0 {
+		return jsonx.J{"ok": false, "error": "add requires at least one ratingKey"}
+	}
+	if !trustManual && isSmart(playlistKey) {
+		return jsonx.J{"ok": false, "error": smartRefusal}
+	}
+	sid := serverID
+	if sid == "" {
+		sid = playback.GetServerMachineID()
+	}
+	if sid == "" {
+		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+	}
+	for _, rk := range ratingKeys {
+		api.Put(fmt.Sprintf("/playlists/%s/items", playlistKey), url.Values{"uri": {uriFor(sid, rk)}})
+	}
+	return jsonx.J{"ok": true, "added": len(ratingKeys)}
+}
+
+// AddItems mirrors playlists.add_items (public entry point: no server-id
+// override, no trust of the smart guard).
+func AddItems(playlistKey string, ratingKeys []string) jsonx.J {
+	return addItemsInternal(playlistKey, ratingKeys, "", false)
+}
+
+// RemoveItem mirrors playlists.remove_item: remove one item from a playlist
+// by its playlistItemID (the per-playlist mutation handle, distinct from
+// ratingKey; smart playlists yield null playlistItemID). Refuses smart
+// playlists.
+func RemoveItem(playlistKey, playlistItemID string) jsonx.J {
+	if isSmart(playlistKey) {
+		return jsonx.J{"ok": false, "error": smartRefusal}
+	}
+	api.Delete(fmt.Sprintf("/playlists/%s/items/%s", playlistKey, playlistItemID), nil)
+	return jsonx.J{"ok": true}
+}
+
+// Clear mirrors playlists.clear: remove every item from a playlist. Refuses
+// smart playlists.
+func Clear(playlistKey string) jsonx.J {
+	if isSmart(playlistKey) {
+		return jsonx.J{"ok": false, "error": smartRefusal}
+	}
+	api.Delete(fmt.Sprintf("/playlists/%s/items", playlistKey), nil)
+	return jsonx.J{"ok": true}
+}

@@ -62,6 +62,9 @@ func Truthy(v any) bool {
 		return t != 0
 	case int64:
 		return t != 0
+	case json.Number:
+		f, err := t.Float64()
+		return err != nil || f != 0
 	case []any:
 		return len(t) > 0
 	case map[string]any:
@@ -80,6 +83,12 @@ func Num(v any) float64 {
 		return float64(t)
 	case int64:
 		return float64(t)
+	case json.Number:
+		f, err := t.Float64()
+		if err != nil {
+			return 0
+		}
+		return f
 	}
 	return 0
 }
@@ -89,8 +98,12 @@ func Num(v any) float64 {
 // meant for strings and numbers; other types are best-effort.
 func AsStr(v any) string {
 	switch t := v.(type) {
+	case nil:
+		return "None" // Python str(None)
 	case string:
 		return t
+	case json.Number:
+		return t.String()
 	case float64:
 		if t == math.Trunc(t) && math.Abs(t) < 1e15 {
 			return strconv.FormatInt(int64(t), 10)
@@ -102,6 +115,40 @@ func AsStr(v any) string {
 		return strconv.FormatInt(t, 10)
 	}
 	return fmt.Sprint(v)
+}
+
+// PyRepr renders a string the way Python repr() does inside f-string {x!r}
+// interpolations: single quotes by default, double quotes when the string
+// contains a single quote (and no double quote), backslash escapes for the
+// quote character, backslashes, and control characters. Error messages built
+// with !r are part of the frozen output contract, and titles with
+// apostrophes ("Grey's Anatomy") are common.
+func PyRepr(s string) string {
+	quote := byte('\'')
+	if strings.ContainsRune(s, '\'') && !strings.ContainsRune(s, '"') {
+		quote = '"'
+	}
+	var b strings.Builder
+	b.WriteByte(quote)
+	for _, r := range s {
+		switch {
+		case r == rune(quote) || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f:
+			fmt.Fprintf(&b, `\x%02x`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte(quote)
+	return b.String()
 }
 
 // Marshal renders v as one line of JSON without HTML escaping, matching
