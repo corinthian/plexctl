@@ -35,11 +35,17 @@ func randomClientIDSuffix() string {
 	return hex.EncodeToString(b)
 }
 
-// classifyAuthTransport mirrors the requests exception ladder for the
-// sign-in POST: connect/read timeouts classify first (matching
-// api.classifyTransport's ordering note), then a generic connection
-// failure, then a catch-all.
+// classifyAuthTransport mirrors auth.py's exception ladder, which — unlike
+// api.py's — catches ConnectionError BEFORE Timeout. requests'
+// ConnectTimeout subclasses ConnectionError, so a connect-phase timeout is
+// "connection failed" here; only read timeouts are "auth request timed out".
+// The sign-in client uses a bounded dialer so dial-phase stalls surface as
+// dial op-errors rather than the phase-blind Client.Timeout error.
 func classifyAuthTransport(err error) string {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return "connection failed: " + err.Error()
+	}
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
 		return "auth request timed out: " + err.Error()
@@ -49,6 +55,25 @@ func classifyAuthTransport(err error) string {
 		return "connection failed: " + err.Error()
 	}
 	return "auth request failed: " + err.Error()
+}
+
+// readPassword mirrors getpass.getpass: hidden input on a terminal, plain
+// line-read fallback (with getpass's stderr warning) when stdin is not a
+// tty — a scripted `printf "user\npass\n..." | plexctl auth login` must
+// consume the password line instead of silently skipping it.
+func readPassword(reader *bufio.Reader) string {
+	fmt.Print("  Password: ")
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err == nil {
+			return strings.TrimSpace(string(passwordBytes))
+		}
+	}
+	fmt.Fprintln(os.Stderr, "Warning: Password input may be echoed.")
+	line, _ := reader.ReadString('\n')
+	fmt.Println()
+	return strings.TrimSpace(line)
 }
 
 // Login mirrors auth.login (interactive; prints JSON result or error+exit).
@@ -61,10 +86,7 @@ func Login() {
 	username, _ := reader.ReadString('\n')
 	username = strings.TrimSpace(username)
 
-	fmt.Print("  Password: ")
-	passwordBytes, _ := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
-	password := strings.TrimSpace(string(passwordBytes))
+	password := readPassword(reader)
 
 	fmt.Printf("  PMS URL [%s]: ", config.Defaults["server_url"])
 	serverURL, _ := reader.ReadString('\n')
@@ -106,7 +128,16 @@ func Login() {
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
+	// Dial timeout slightly under the overall deadline so a connect stall
+	// reliably classifies as a dial error ("connection failed", matching
+	// requests.ConnectTimeout ⊂ ConnectionError) rather than racing the
+	// phase-blind Client.Timeout.
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{Timeout: 14 * time.Second}).DialContext,
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		output.Fail(classifyAuthTransport(err))
@@ -166,12 +197,18 @@ func Login() {
 		return
 	}
 
-	_ = config.Save([]config.KV{
+	// Python's cfg.save() propagates filesystem errors (traceback, exit 1);
+	// the Go equivalent is the standard JSON error + exit 1 — never a false
+	// "token saved" success.
+	if err := config.Save([]config.KV{
 		{K: "server_url", V: serverURL},
 		{K: "token", V: token},
 		{K: "default_client", V: defaultClient},
 		{K: "client_id", V: clientID},
-	})
+	}); err != nil {
+		output.Fail(fmt.Sprintf("failed to write config at %s: %s", config.Path(), err.Error()))
+		return
+	}
 
 	output.Print(jsonx.J{"ok": true, "message": fmt.Sprintf("token saved to %s", config.Path())})
 }
