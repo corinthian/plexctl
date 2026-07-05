@@ -709,7 +709,7 @@ func TestFillDurationsFillsOnlyMissingDurations(t *testing.T) {
 	if f.callCount("/library/metadata/1") != 0 {
 		t.Fatal("row 0 already had duration; must not trigger a fetch")
 	}
-	if got[1]["duration"] != float64(9999) || got[1]["year"] != float64(2001) {
+	if got[1]["duration"] != json.Number("9999") || got[1]["year"] != json.Number("2001") {
 		t.Fatalf("row 1 = %#v, want filled duration/year", got[1])
 	}
 	if got[2]["duration"] != nil {
@@ -732,7 +732,7 @@ func TestFillDurationsToleratesPerItemFailure(t *testing.T) {
 	if got[0]["duration"] != nil {
 		t.Fatalf("row 0 should remain nil after best-effort failure: %#v", got[0])
 	}
-	if got[1]["duration"] != float64(555) {
+	if got[1]["duration"] != json.Number("555") {
 		t.Fatalf("row 1 = %#v, want filled despite sibling failure", got[1])
 	}
 }

@@ -134,8 +134,8 @@ func TestNowPlayingFoundReturnsFullProjection(t *testing.T) {
 
 	want := jsonx.J{
 		"ok": true, "state": "playing", "title": "Vertigo", "type": "movie",
-		"show": nil, "season": nil, "episode": nil, "year": float64(1979),
-		"viewOffset": float64(33), "duration": float64(5808333), "ratingKey": "44727",
+		"show": nil, "season": nil, "episode": nil, "year": json.Number("1979"),
+		"viewOffset": json.Number("33"), "duration": json.Number("5808333"), "ratingKey": "44727",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got = %#v, want keys %v", got, want)
@@ -158,7 +158,7 @@ func TestNowPlayingTVEpisodeFields(t *testing.T) {
 	)}))
 
 	got := sessions.NowPlaying(testClient())
-	if got["show"] != "Some Show" || got["season"] != float64(1) || got["episode"] != float64(3) {
+	if got["show"] != "Some Show" || got["season"] != json.Number("1") || got["episode"] != json.Number("3") {
 		t.Fatalf("got = %#v, want show/season/episode populated", got)
 	}
 }
@@ -269,7 +269,7 @@ func TestHistoryRowProjectionAndFillDurationsIntegration(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("len(rows) = %d, want 2", len(rows))
 	}
-	if rows[0]["duration"] != float64(6381245) || rows[0]["year"] != float64(1983) {
+	if rows[0]["duration"] != json.Number("6381245") || rows[0]["year"] != json.Number("1983") {
 		t.Fatalf("row 0 = %#v, want filled duration/year", rows[0])
 	}
 	if rows[1]["duration"] != nil || rows[1]["year"] != nil {
@@ -298,7 +298,7 @@ func TestContinueWatchingConcatenatesHubsAndProjects(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("len(items) = %d, want 2 (concat across hubs)", len(items))
 	}
-	if items[0]["title"] != "Ep1" || items[0]["show"] != "Show A" || items[0]["season"] != float64(1) {
+	if items[0]["title"] != "Ep1" || items[0]["show"] != "Show A" || items[0]["season"] != json.Number("1") {
 		t.Fatalf("item 0 = %#v", items[0])
 	}
 	if items[1]["title"] != "Movie B" || items[1]["ratingKey"] != "2" {
@@ -361,7 +361,7 @@ func TestContextHappyPathBundlesAllSections(t *testing.T) {
 		t.Fatalf("queue = %#v", q)
 	}
 	items := q["items"].([]jsonx.J)
-	if len(items) != 2 || items[0]["ratingKey"] != "44727" || items[0]["duration"] != float64(5808333) {
+	if len(items) != 2 || items[0]["ratingKey"] != "44727" || items[0]["duration"] != json.Number("5808333") {
 		t.Fatalf("queue items = %#v", items)
 	}
 	if items[0]["selected"] != true || items[1]["selected"] != false {
@@ -376,10 +376,10 @@ func TestContextHappyPathBundlesAllSections(t *testing.T) {
 	if len(hItems) != 2 {
 		t.Fatalf("len(history items) = %d, want 2", len(hItems))
 	}
-	if hItems[0]["duration"] != float64(6381245) || hItems[0]["year"] != float64(1983) {
+	if hItems[0]["duration"] != json.Number("6381245") || hItems[0]["year"] != json.Number("1983") {
 		t.Fatalf("history row 0 = %#v, want preserved duration/year", hItems[0])
 	}
-	if hItems[1]["duration"] != float64(1320000) || hItems[1]["year"] != float64(2018) {
+	if hItems[1]["duration"] != json.Number("1320000") || hItems[1]["year"] != json.Number("2018") {
 		t.Fatalf("history row 1 = %#v, want filled via metadata fan-out", hItems[1])
 	}
 	if hItems[1]["show"] != "Some Show" {

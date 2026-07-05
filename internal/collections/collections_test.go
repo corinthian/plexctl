@@ -276,7 +276,7 @@ func TestShowManualCollectionFallsThroughToChildren(t *testing.T) {
 	if got := titles(rows); len(got) != 1 || got[0] != "Rocky" {
 		t.Fatalf("titles = %v", got)
 	}
-	if rows[0]["duration"] != float64(9090000) {
+	if rows[0]["duration"] != json.Number("9090000") {
 		t.Fatalf("duration = %#v, want 9090000 (already present, no enrichment)", rows[0]["duration"])
 	}
 }
@@ -300,7 +300,7 @@ func TestShowSmartCollectionFollowsContentURI(t *testing.T) {
 	if got := titles(rows); len(got) != 2 || got[0] != "Recently Watched 1" || got[1] != "Recently Watched 2" {
 		t.Fatalf("titles = %v", got)
 	}
-	if rows[0]["duration"] != float64(7200000) || rows[1]["duration"] != float64(8100000) {
+	if rows[0]["duration"] != json.Number("7200000") || rows[1]["duration"] != json.Number("8100000") {
 		t.Fatalf("durations = %#v / %#v", rows[0]["duration"], rows[1]["duration"])
 	}
 	if f.callCount("/library/metadata/10/children") != 0 {
@@ -345,7 +345,7 @@ func TestShowManualCollectionEnrichesMissingDuration(t *testing.T) {
 	f.onJSON("/library/metadata/501", mc(jsonx.J{"ratingKey": "501", "duration": float64(9090000), "year": float64(2021)}))
 
 	rows := Show("10", false)
-	if rows[0]["duration"] != float64(9090000) {
+	if rows[0]["duration"] != json.Number("9090000") {
 		t.Fatalf("duration = %#v, want enriched 9090000", rows[0]["duration"])
 	}
 }

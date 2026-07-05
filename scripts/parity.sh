@@ -6,9 +6,14 @@
 #
 # Usage: scripts/parity.sh
 # Env:   PY_BIN (default ~/.local/bin/plexctl), GO_BIN (default dist/plexctl)
+#        GO_CONFIG_DIR — optional PLEXCTL_CONFIG_DIR override for the Go
+#        binary only (used to route it through a loopback forwarder when
+#        macOS Local Network TCC denies the unsigned dev binary direct LAN
+#        access; see the port plan's cutover notes).
 set -u
 PY_BIN="${PY_BIN:-$HOME/.local/bin/plexctl}"
 GO_BIN="${GO_BIN:-dist/plexctl}"
+GO_CONFIG_DIR="${GO_CONFIG_DIR:-}"
 
 # Volatile fields that legitimately differ between two immediate runs.
 NORM='del(.elapsedMs?, .fetchedAt?, .viewOffset?) | if .nowPlaying? then .nowPlaying |= del(.viewOffset?) else . end'
@@ -26,7 +31,11 @@ run_case() {
   local name=$1; shift
   local py_out go_out py_exit go_exit py_n go_n
   py_out=$("$PY_BIN" "$@" 2>/dev/null); py_exit=$?
-  go_out=$("$GO_BIN" "$@" 2>/dev/null); go_exit=$?
+  if [ -n "$GO_CONFIG_DIR" ]; then
+    go_out=$(PLEXCTL_CONFIG_DIR="$GO_CONFIG_DIR" "$GO_BIN" "$@" 2>/dev/null); go_exit=$?
+  else
+    go_out=$("$GO_BIN" "$@" 2>/dev/null); go_exit=$?
+  fi
   # Normalize every line (NDJSON-safe), slurp into a sorted array.
   py_n=$(printf '%s\n' "$py_out" | jq -S -c "$NORM" 2>/dev/null | jq -s -S . 2>/dev/null)
   go_n=$(printf '%s\n' "$go_out" | jq -S -c "$NORM" 2>/dev/null | jq -s -S . 2>/dev/null)

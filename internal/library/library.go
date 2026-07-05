@@ -4,6 +4,7 @@
 package library
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
@@ -53,6 +54,12 @@ func itemScore(item jsonx.J) float64 {
 		return float64(t)
 	case int64:
 		return float64(t)
+	case json.Number:
+		f, err := t.Float64()
+		if err != nil {
+			return 0.0
+		}
+		return f
 	case bool:
 		if t {
 			return 1.0

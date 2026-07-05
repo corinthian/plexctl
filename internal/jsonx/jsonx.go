@@ -62,6 +62,9 @@ func Truthy(v any) bool {
 		return t != 0
 	case int64:
 		return t != 0
+	case json.Number:
+		f, err := t.Float64()
+		return err != nil || f != 0
 	case []any:
 		return len(t) > 0
 	case map[string]any:
@@ -80,6 +83,12 @@ func Num(v any) float64 {
 		return float64(t)
 	case int64:
 		return float64(t)
+	case json.Number:
+		f, err := t.Float64()
+		if err != nil {
+			return 0
+		}
+		return f
 	}
 	return 0
 }
@@ -91,6 +100,8 @@ func AsStr(v any) string {
 	switch t := v.(type) {
 	case string:
 		return t
+	case json.Number:
+		return t.String()
 	case float64:
 		if t == math.Trunc(t) && math.Abs(t) < 1e15 {
 			return strconv.FormatInt(int64(t), 10)

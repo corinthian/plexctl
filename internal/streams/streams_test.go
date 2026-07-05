@@ -380,7 +380,7 @@ func TestAuditAudioForKeyComposesEpisodesAndRows(t *testing.T) {
 		t.Fatalf("rows = %#v, want 2", rows)
 	}
 	// EpisodesForShowKey sorts ascending by (season, index).
-	if rows[0]["episode"] != float64(1) || rows[1]["episode"] != float64(2) {
+	if rows[0]["episode"] != json.Number("1") || rows[1]["episode"] != json.Number("2") {
 		t.Fatalf("rows not in season/episode order: %#v", rows)
 	}
 }
@@ -398,7 +398,7 @@ func TestSetAudioStreamByLanguage(t *testing.T) {
 	if out["ok"] != true {
 		t.Fatalf("ok = %#v, want true: %#v", out["ok"], out)
 	}
-	if out["partId"] != float64(900) || out["audioStreamID"] != float64(2) {
+	if out["partId"] != json.Number("900") || out["audioStreamID"] != json.Number("2") {
 		t.Fatalf("out = %#v, want partId=900 audioStreamID=2", out)
 	}
 	q := lastQuery(f, isPartsPUT)
@@ -418,7 +418,7 @@ func TestSetAudioStreamByStreamID(t *testing.T) {
 	))
 
 	out := streams.SetAudioStream("123", "", intPtr(6))
-	if out["ok"] != true || out["audioStreamID"] != float64(6) {
+	if out["ok"] != true || out["audioStreamID"] != json.Number("6") {
 		t.Fatalf("out = %#v, want ok=true audioStreamID=6", out)
 	}
 	q := lastQuery(f, isPartsPUT)
@@ -436,7 +436,7 @@ func TestSetAudioStreamIDPrecedenceOverLanguage(t *testing.T) {
 	))
 
 	out := streams.SetAudioStream("123", "deu", intPtr(2))
-	if out["audioStreamID"] != float64(2) {
+	if out["audioStreamID"] != json.Number("2") {
 		t.Fatalf("audioStreamID = %#v, want 2 (streamID beats language)", out["audioStreamID"])
 	}
 }
@@ -518,7 +518,7 @@ func TestSetSubtitleStreamByLanguage(t *testing.T) {
 	newFakePMS(t).addMeta("123", meta("123", 900, subtitleStream("eng", 3), subtitleStream("spa", 4)))
 
 	out := streams.SetSubtitleStream("123", "spa", nil, false)
-	if out["ok"] != true || out["subtitleStreamID"] != float64(4) {
+	if out["ok"] != true || out["subtitleStreamID"] != json.Number("4") {
 		t.Fatalf("out = %#v, want ok=true subtitleStreamID=4", out)
 	}
 }
@@ -527,7 +527,7 @@ func TestSetSubtitleStreamByStreamID(t *testing.T) {
 	newFakePMS(t).addMeta("123", meta("123", 900, subtitleStream("eng", 3), subtitleStream("spa", 4)))
 
 	out := streams.SetSubtitleStream("123", "", intPtr(3), false)
-	if out["ok"] != true || out["subtitleStreamID"] != float64(3) {
+	if out["ok"] != true || out["subtitleStreamID"] != json.Number("3") {
 		t.Fatalf("out = %#v, want ok=true subtitleStreamID=3", out)
 	}
 }
@@ -641,7 +641,7 @@ func TestPlanBulkAudioPairsStreamWithOwnPart(t *testing.T) {
 	))
 
 	plan := streams.PlanBulkAudio([]jsonx.J{ep(1, 1, "10")}, "eng", false)
-	if plan[0]["partId"] != float64(600) || plan[0]["toStreamId"] != float64(7) {
+	if plan[0]["partId"] != json.Number("600") || plan[0]["toStreamId"] != json.Number("7") {
 		t.Fatalf("plan[0] = %#v, want partId=600 toStreamId=7", plan[0])
 	}
 }

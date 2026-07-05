@@ -182,6 +182,10 @@ func getSession(client jsonx.J) jsonx.J {
 				viewOffset = v
 			case int64:
 				viewOffset = int(v)
+			case json.Number:
+				if f, err := v.Float64(); err == nil {
+					viewOffset = int(f)
+				}
 			}
 		}
 		return jsonx.J{"state": player["state"], "viewOffset": viewOffset}
