@@ -1,0 +1,525 @@
+package playback
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/corinthian/plexctl/internal/api"
+	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/testutil"
+)
+
+// --- fakes -------------------------------------------------------------
+
+type companionCall struct {
+	path   string
+	query  url.Values
+	header http.Header
+}
+
+// fakeCompanion stands in for the Apple TV's Companion HTTP endpoint. It
+// records every request and can be told to fail specific paths.
+type fakeCompanion struct {
+	mu    sync.Mutex
+	calls []companionCall
+	fail  map[string]int
+}
+
+func newFakeCompanion(t *testing.T) (*fakeCompanion, *httptest.Server) {
+	t.Helper()
+	fc := &fakeCompanion{fail: map[string]int{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fc.mu.Lock()
+		fc.calls = append(fc.calls, companionCall{path: r.URL.Path, query: r.URL.Query(), header: r.Header.Clone()})
+		status, failing := fc.fail[r.URL.Path]
+		fc.mu.Unlock()
+		if failing {
+			http.Error(w, "boom", status)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return fc, srv
+}
+
+func (fc *fakeCompanion) failPath(path string, status int) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.fail[path] = status
+}
+
+func (fc *fakeCompanion) snapshot() []companionCall {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	out := make([]companionCall, len(fc.calls))
+	copy(out, fc.calls)
+	return out
+}
+
+func (fc *fakeCompanion) paths() []string {
+	calls := fc.snapshot()
+	out := make([]string, len(calls))
+	for i, c := range calls {
+		out[i] = c.path
+	}
+	return out
+}
+
+func (fc *fakeCompanion) last() companionCall {
+	calls := fc.snapshot()
+	return calls[len(calls)-1]
+}
+
+func fakeClient(baseurl string) jsonx.J {
+	return jsonx.J{"machineIdentifier": "atv-1", "baseurl": baseurl}
+}
+
+// newFakePMS serves /status/sessions (empty Metadata when session is nil)
+// and / (machineIdentifier omitted when serverMachineID is "").
+func newFakePMS(t *testing.T, session jsonx.J, serverMachineID string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/status/sessions":
+			meta := []any{}
+			if session != nil {
+				meta = append(meta, jsonx.J{
+					"viewOffset": session["viewOffset"],
+					"Player": jsonx.J{
+						"machineIdentifier": "atv-1",
+						"state":             session["state"],
+					},
+				})
+			}
+			b, _ := json.Marshal(jsonx.J{"MediaContainer": jsonx.J{"Metadata": meta}})
+			w.Write(b)
+		case "/":
+			mc := jsonx.J{}
+			if serverMachineID != "" {
+				mc["machineIdentifier"] = serverMachineID
+			}
+			b, _ := json.Marshal(jsonx.J{"MediaContainer": mc})
+			w.Write(b)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// --- transport commands: happy path, commandID, error classification -------
+
+func TestPlayerCmdHappyPathHeadersAndParams(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	testutil.Setup(t, "http://pms.test:32400")
+	client := fakeClient(csrv.URL)
+
+	result := Play(client)
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	call := fc.last()
+	if call.query.Get("type") != "video" {
+		t.Fatalf("missing type=video: %v", call.query)
+	}
+	if call.query.Get("commandID") == "" {
+		t.Fatalf("missing commandID: %v", call.query)
+	}
+	if call.header.Get("X-Plex-Target-Client-Identifier") != "atv-1" {
+		t.Fatalf("missing target client id header: %v", call.header)
+	}
+}
+
+func TestCommandIDMonotonicAcrossCalls(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	testutil.Setup(t, "http://pms.test:32400")
+	client := fakeClient(csrv.URL)
+
+	Play(client)
+	Pause(client)
+	calls := fc.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("want 2 calls, got %d", len(calls))
+	}
+	id1, _ := strconv.ParseInt(calls[0].query.Get("commandID"), 10, 64)
+	id2, _ := strconv.ParseInt(calls[1].query.Get("commandID"), 10, 64)
+	if id2 <= id1 {
+		t.Fatalf("commandID not strictly increasing: %d -> %d", id1, id2)
+	}
+}
+
+func TestConnectionFailedClassification(t *testing.T) {
+	testutil.Setup(t, "http://pms.test:32400")
+	client := fakeClient("http://127.0.0.1:1") // nothing listens here
+
+	result := Play(client)
+	if jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want failure, got %#v", result)
+	}
+	errStr, _ := result["error"].(string)
+	if !strings.HasPrefix(errStr, "connection failed:") {
+		t.Fatalf("want 'connection failed:' prefix, got %q", errStr)
+	}
+}
+
+func TestTimeoutClassification(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+	}))
+	t.Cleanup(slow.Close)
+	testutil.Setup(t, "http://pms.test:32400")
+	api.SetTimeoutOverride(0.05)
+	t.Cleanup(api.ClearTimeoutOverride)
+
+	result := Play(fakeClient(slow.URL))
+	errStr, _ := result["error"].(string)
+	if !strings.HasPrefix(errStr, "request timed out:") {
+		t.Fatalf("want 'request timed out:' prefix, got %q", errStr)
+	}
+}
+
+func TestHTTPErrorClassification(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	fc.failPath("/player/playback/play", 404)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	result := Play(fakeClient(csrv.URL))
+	errStr, _ := result["error"].(string)
+	if !strings.HasPrefix(errStr, "HTTP 404:") {
+		t.Fatalf("want 'HTTP 404:' prefix, got %q", errStr)
+	}
+}
+
+// --- PlayerGet ---------------------------------------------------------
+
+func TestPlayerGetParsesJSON(t *testing.T) {
+	companion := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"foo": "bar"}`))
+	}))
+	t.Cleanup(companion.Close)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	result, err := PlayerGet(fakeClient(companion.URL), "/player/timeline/poll", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result["foo"] != "bar" {
+		t.Fatalf("got %#v", result)
+	}
+}
+
+func TestPlayerGetEmptyBodyIsEmptyMap(t *testing.T) {
+	companion := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(companion.Close)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	result, err := PlayerGet(fakeClient(companion.URL), "/player/timeline/poll", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("want empty map, got %#v", result)
+	}
+}
+
+func TestPlayerGetTransportErrorWraps(t *testing.T) {
+	testutil.Setup(t, "http://pms.test:32400")
+
+	_, err := PlayerGet(fakeClient("http://127.0.0.1:1"), "/player/timeline/poll", nil)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if _, ok := err.(*CompanionTransportError); !ok {
+		t.Fatalf("want *CompanionTransportError, got %T", err)
+	}
+}
+
+// --- seek ----------------------------------------------------------------
+
+func TestSeekRejectsBadFormat(t *testing.T) {
+	result := Seek(fakeClient("http://unused"), "not-a-time", true)
+	if got := result["error"]; got != "unrecognised position format: 'not-a-time'" {
+		t.Fatalf("error = %q", got)
+	}
+	if jsonx.Truthy(result["ok"]) {
+		t.Fatal("want ok=false")
+	}
+}
+
+func TestSeekRejectsSecondsGE60(t *testing.T) {
+	result := Seek(fakeClient("http://unused"), "99:99", true)
+	if got := result["error"]; got != "invalid seek position: seconds must be < 60" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestSeekRejectsMinutesGE60WithHours(t *testing.T) {
+	result := Seek(fakeClient("http://unused"), "1:99:30", true)
+	if got := result["error"]; got != "invalid seek position: minutes must be < 60 when hours given" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestSeekAcceptsHighMinutesWithoutHours(t *testing.T) {
+	// mm:ss with mm >= 60 stays valid -- only enforced when hours are given.
+	fc, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 0}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := Seek(fakeClient(csrv.URL), "99:30", true)
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	seekOffset(t, fc, "5970000") // (99*60+30)*1000
+}
+
+func seekOffset(t *testing.T, fc *fakeCompanion, want string) {
+	t.Helper()
+	for _, c := range fc.snapshot() {
+		if strings.HasSuffix(c.path, "/seekTo") {
+			if got := c.query.Get("offset"); got != want {
+				t.Fatalf("seekTo offset = %s, want %s", got, want)
+			}
+			return
+		}
+	}
+	t.Fatal("no seekTo call recorded")
+}
+
+func TestSeekAbsoluteMMSS(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 0}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := Seek(fakeClient(csrv.URL), "1:30", true)
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	seekOffset(t, fc, "90000")
+}
+
+func TestSeekAbsoluteHHMMSS(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 0}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := Seek(fakeClient(csrv.URL), "1:00:00", true)
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	seekOffset(t, fc, "3600000")
+}
+
+func TestSeekRelativePlusSeconds(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 60000}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := Seek(fakeClient(csrv.URL), "+30s", true)
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	seekOffset(t, fc, "90000")
+}
+
+func TestSeekRelativeMinusMinuteClampsToZero(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 60000}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := Seek(fakeClient(csrv.URL), "-1m", true)
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	seekOffset(t, fc, "0")
+}
+
+func TestSeekRelativeNoSession(t *testing.T) {
+	_, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, nil, "server-mid") // no matching session
+	testutil.Setup(t, pms.URL)
+
+	result := Seek(fakeClient(csrv.URL), "+30s", true)
+	if got := result["error"]; got != "could not determine current playback position" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestSeekPausedDanceOrdering(t *testing.T) {
+	oldSleep := sleep
+	sleep = func(time.Duration) {}
+	t.Cleanup(func() { sleep = oldSleep })
+
+	fc, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, jsonx.J{"state": "paused", "viewOffset": 0}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := Seek(fakeClient(csrv.URL), "1:30", true)
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	got := fc.paths()
+	want := []string{"/player/playback/play", "/player/playback/seekTo", "/player/playback/pause"}
+	if !equalStrings(got, want) {
+		t.Fatalf("sequence = %v, want %v", got, want)
+	}
+}
+
+func TestSeekNoUnpauseSkipsDance(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	// No PMS server needed: unpause=false + absolute position never fetches
+	// a session.
+	testutil.Setup(t, "http://pms.test:32400")
+
+	result := Seek(fakeClient(csrv.URL), "1:30", false)
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	got := fc.paths()
+	want := []string{"/player/playback/seekTo"}
+	if !equalStrings(got, want) {
+		t.Fatalf("sequence = %v, want %v", got, want)
+	}
+}
+
+func TestSeekResumeFailureMessage(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	fc.failPath("/player/playback/play", 500)
+	pms := newFakePMS(t, jsonx.J{"state": "paused", "viewOffset": 0}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := Seek(fakeClient(csrv.URL), "1:30", true)
+	errStr, _ := result["error"].(string)
+	if !strings.HasPrefix(errStr, "could not resume before seek: ") {
+		t.Fatalf("error = %q", errStr)
+	}
+	for _, p := range fc.paths() {
+		if strings.HasSuffix(p, "/seekTo") {
+			t.Fatal("seekTo must not be called after a resume failure")
+		}
+	}
+}
+
+func TestSeekRepauseFailureMessage(t *testing.T) {
+	oldSleep := sleep
+	sleep = func(time.Duration) {}
+	t.Cleanup(func() { sleep = oldSleep })
+
+	fc, csrv := newFakeCompanion(t)
+	fc.failPath("/player/playback/pause", 500)
+	pms := newFakePMS(t, jsonx.J{"state": "paused", "viewOffset": 0}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := Seek(fakeClient(csrv.URL), "1:30", true)
+	errStr, _ := result["error"].(string)
+	if !strings.HasPrefix(errStr, "seeked but failed to restore pause state: ") {
+		t.Fatalf("error = %q", errStr)
+	}
+}
+
+// --- PlayMedia / PlayQueue -------------------------------------------------
+
+func TestPlayMediaAddressPortAndKeyShape(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, nil, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := PlayMedia(fakeClient(csrv.URL), "12345")
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	call := fc.last()
+	pmsURL, _ := url.Parse(pms.URL)
+	if got := call.query.Get("address"); got != pmsURL.Hostname() {
+		t.Fatalf("address = %s, want %s", got, pmsURL.Hostname())
+	}
+	if got := call.query.Get("port"); got != pmsURL.Port() {
+		t.Fatalf("port = %s, want %s", got, pmsURL.Port())
+	}
+	if got := call.query.Get("key"); got != "/library/metadata/12345" {
+		t.Fatalf("key = %s", got)
+	}
+	if got := call.query.Get("containerKey"); got != "/library/metadata/12345" {
+		t.Fatalf("containerKey = %s", got)
+	}
+	if got := call.query.Get("machineIdentifier"); got != "server-mid" {
+		t.Fatalf("machineIdentifier = %s", got)
+	}
+	if got := call.query.Get("offset"); got != "0" {
+		t.Fatalf("offset = %s", got)
+	}
+	if call.query.Has("playQueueID") {
+		t.Fatal("playQueueID must not be present for playMedia")
+	}
+}
+
+func TestPlayQueueKeyShapeAndParams(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, nil, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result := PlayQueue(fakeClient(csrv.URL), "5535", "42687")
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	call := fc.last()
+	if got := call.query.Get("key"); got != "/playQueues/5535" {
+		t.Fatalf("key = %s", got)
+	}
+	if got := call.query.Get("playQueueID"); got != "5535" {
+		t.Fatalf("playQueueID = %s", got)
+	}
+	if got := call.query.Get("playQueueSelectedItemID"); got != "42687" {
+		t.Fatalf("playQueueSelectedItemID = %s", got)
+	}
+	if call.query.Has("containerKey") {
+		t.Fatal("containerKey must not be present for playQueue")
+	}
+}
+
+func TestPlayQueueMissingServerMachineID(t *testing.T) {
+	_, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, nil, "") // "/" carries no machineIdentifier
+	testutil.Setup(t, pms.URL)
+
+	result := PlayQueue(fakeClient(csrv.URL), "5535", "42687")
+	if got := result["error"]; got != "could not retrieve server machineIdentifier" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestPlayMediaMissingServerMachineID(t *testing.T) {
+	_, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, nil, "")
+	testutil.Setup(t, pms.URL)
+
+	result := PlayMedia(fakeClient(csrv.URL), "12345")
+	if got := result["error"]; got != "could not retrieve server machineIdentifier" {
+		t.Fatalf("error = %q", got)
+	}
+}
