@@ -8,6 +8,17 @@ This is a behavior-frozen port: the command surface, JSON shapes, exit codes (0 
 
 Fully ported and tested at the unit level (httptest fakes, all frozen strings and PMS quirks pinned by tests), plus read-only parity verified against the live PMS with the Python binary side by side (`scripts/parity.sh`). Not yet cut over: the live Apple TV player gates (transport, queue playback) and live write gates (collections/playlists mutation, set-audio) run at cutover to 1.0. Until then the pipx Python install stays the deployed binary.
 
+## Known deviations from the Python original
+
+Verified by adversarial review of every module; everything not listed here matched line-for-line, and 24/24 read-only commands diff identical (jq-normalized) against the Python binary on the live PMS.
+
+- JSON text form: key order differs (Go sorts), no `", "` separators, em-dashes emitted as UTF-8 instead of `—` escapes. Identical after parsing; the `/plex` skill and jq consumers are unaffected.
+- Where Python would crash with a traceback on inputs that never occur (malformed PMS payload shapes, corrupt `queue_state.json` of the wrong JSON type), the Go port stays graceful (empty result or standard JSON error).
+- Usage-error wording on stderr differs (cobra vs click); exit code 2 and empty stdout match.
+- `X-Plex-Version`/`X-Plex-Platform` headers report the Go port's identity.
+- `$PLEXCTL_CONFIG_DIR` redirects `config.toml` too (Python honored it only for `queue_state.json`).
+- macOS Local Network privacy: a fresh unsigned binary gets silently denied LAN access (TCP to the PMS black-holes). At cutover the binary needs a one-time Local Network grant (or signing); until then `scripts/parity.sh` supports `GO_CONFIG_DIR` pointing at a config that routes through a loopback forwarder.
+
 ## Build
 
 ```
