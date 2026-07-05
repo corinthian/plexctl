@@ -51,3 +51,40 @@ func TestGetHelpers(t *testing.T) {
 		t.Fatal("missing-key defaults wrong")
 	}
 }
+
+func TestAsStrNilIsNone(t *testing.T) {
+	// Python str(None) == "None" — error-message interpolation must match.
+	if got := AsStr(nil); got != "None" {
+		t.Errorf("AsStr(nil) = %q, want %q", got, "None")
+	}
+}
+
+// TestPyRepr pins repr()-style quoting/escaping for the frozen error-message
+// contract (e.g. "unrecognised position format: %r", "no episodes found for:
+// %r"). Python's repr() defaults to single quotes, switches to double quotes
+// only when the string contains a single quote and no double quote, and
+// otherwise always escapes backslashes, the chosen quote character, and
+// control characters.
+func TestPyRepr(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain string", "x", `'x'`},
+		{"apostrophe only -> double-quoted, apostrophe unescaped",
+			"Grey's Anatomy", `"Grey's Anatomy"`},
+		{"both quote kinds -> single-quoted, apostrophe escaped, double quote bare",
+			`a'b"c`, `'a\'b"c'`},
+		{"backslash escaped", `a\b`, `'a\\b'`},
+		{"newline/tab/carriage-return escapes", "a\nb\tc\rd", `'a\nb\tc\rd'`},
+		{"control char -> \\x escape", "a\x01b", `'a\x01b'`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := PyRepr(c.in); got != c.want {
+				t.Errorf("PyRepr(%q) = %s, want %s", c.in, got, c.want)
+			}
+		})
+	}
+}

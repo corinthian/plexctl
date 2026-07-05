@@ -113,3 +113,26 @@ func TestEpisodesEmptyIsOkTrueWithNote(t *testing.T) {
 		t.Fatalf("expected a note key, got %#v", got)
 	}
 }
+
+// TestEpisodesNoteUsesPyReprForApostropheTitle pins jsonx.PyRepr's wiring
+// into the "no episodes found for: %r" message: a query containing an
+// apostrophe must render Python-repr style — double-quoted, apostrophe left
+// unescaped — not Go's %q (which would double-quote and backslash-escape
+// nothing relevant here, but would never single-quote or flip quote style).
+func TestEpisodesNoteUsesPyReprForApostropheTitle(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("GET", "/hubs/search/voice", map[string]any{"MediaContainer": map[string]any{}})
+	f.onJSON("GET", "/hubs/search", map[string]any{"MediaContainer": map[string]any{}})
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"episodes", "Grey's Anatomy"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+	if code != -1 {
+		t.Fatalf("exit = %d, want -1 (ok:true, no exit); out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	want := `no episodes found for: "Grey's Anatomy"`
+	if got["note"] != want {
+		t.Fatalf("note = %#v, want %q (full: %#v)", got["note"], want, got)
+	}
+}
