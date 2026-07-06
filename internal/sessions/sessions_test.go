@@ -468,7 +468,7 @@ func TestContextIdleNowPlayingWhenSessionBelongsToOtherClient(t *testing.T) {
 func TestContextQueueFailureDegradesSectionOnlyTopLevelTracksNowPlaying(t *testing.T) {
 	// A non-404 server error on the queue read degrades that section to
 	// ok:false but leaves the top-level ok tracking nowPlaying. (404 is a
-	// distinct path now — see TestContextStaleQueue404ClearsStateAndDegradesToEmpty.)
+	// distinct path now — see TestContextStaleQueue404KeepsStateAndDegradesToEmpty.)
 	f := newFakePMS(t)
 	queuestate.Save(client1, "5594", "43652")
 	f.onJSON("/status/sessions", mc(jsonx.J{"Metadata": anyList(
@@ -494,10 +494,11 @@ func TestContextQueueFailureDegradesSectionOnlyTopLevelTracksNowPlaying(t *testi
 	}
 }
 
-// B4: a stale saved queue id 404s once PMS prunes the queue. Context must
-// clear the entry and degrade the queue section to empty (ok:true) rather than
-// failing the section — nowPlaying + history stay intact.
-func TestContextStaleQueue404ClearsStateAndDegradesToEmpty(t *testing.T) {
+// C4 (finding 7): a saved queue id that 404s makes Context degrade the queue
+// section to empty (ok:true) rather than failing it — nowPlaying + history stay
+// intact. It must NOT delete the saved entry: a transient 404 on this latency-
+// sensitive startup fetch must not destroy an addressable queue.
+func TestContextStaleQueue404KeepsStateAndDegradesToEmpty(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save(client1, "5594", "43652")
 	f.onJSON("/status/sessions", mc(jsonx.J{"Metadata": anyList(
@@ -520,10 +521,10 @@ func TestContextStaleQueue404ClearsStateAndDegradesToEmpty(t *testing.T) {
 	if q["playQueueID"] != nil {
 		t.Fatalf("playQueueID = %#v, want nil (pruned)", q["playQueueID"])
 	}
-	if queuestate.Load(client1) != nil {
-		t.Fatalf("stale state not cleared: %#v", queuestate.Load(client1))
+	if queuestate.Load(client1) == nil {
+		t.Fatalf("state must be KEPT on 404 (finding 7) — a transient 404 must not delete an addressable queue")
 	}
-	// nowPlaying + history survive the pruned queue.
+	// nowPlaying + history survive the stale queue.
 	if result["nowPlaying"].(jsonx.J)["ok"] != true {
 		t.Fatalf("nowPlaying = %#v, want ok:true", result["nowPlaying"])
 	}

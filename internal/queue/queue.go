@@ -153,10 +153,13 @@ func Show(client jsonx.J) jsonx.J {
 	}
 	data, gerr := api.TryGet("/playQueues/"+qid, nil)
 	if gerr != nil {
-		// PMS pruned the queue: our saved id is stale. Drop it and report the
-		// same empty state as a never-created queue (idempotent, not an error).
+		// A 404 means our saved id no longer resolves — a genuine prune, or a
+		// transient/proxy/restart 404. Degrade to the same empty state as a
+		// never-created queue, but do NOT delete the saved entry: a transient
+		// 404 must not destroy the only record of an addressable queue
+		// (finding 7). The next successful `queue` Save self-heals a genuinely
+		// stale entry.
 		if apiStatus(gerr) == 404 {
-			clearClientState(client)
 			return emptyState(client)
 		}
 		return jsonx.J{"ok": false, "error": errMsg(gerr)}
@@ -299,10 +302,11 @@ func AddToClient(client jsonx.J, ratingKeys []string) jsonx.J {
 	}
 	sizeData, serr := api.TryGet("/playQueues/"+qid, nil)
 	if serr != nil {
-		// Stale saved id: the queue we meant to append to is gone. Drop the
-		// entry and report it the same way an empty resolver would.
+		// A 404 means the saved id no longer resolves. Report no-active-queue,
+		// but do NOT delete the saved entry: a transient 404 must not destroy an
+		// addressable queue (finding 7); the next successful queue Save
+		// self-heals a genuinely stale entry.
 		if apiStatus(serr) == 404 {
-			clearClientState(client)
 			return jsonx.J{"ok": false, "error": fmt.Sprintf("no active queue on %s", clientLabel(client))}
 		}
 		return jsonx.J{"ok": false, "error": errMsg(serr)}

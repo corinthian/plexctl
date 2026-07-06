@@ -550,9 +550,11 @@ func TestShowReturnsEmptyWhenPMSReturnsEmptyMetadata(t *testing.T) {
 	}
 }
 
-// B4: a saved queue id that PMS has pruned 404s. Show clears the stale entry
-// and returns the same empty state as a never-created queue.
-func TestShow404ClearsStateAndReturnsEmpty(t *testing.T) {
+// C4 (finding 7): a saved queue id that 404s (genuine prune OR transient) makes
+// Show degrade to the same empty state as a never-created queue — but it must
+// NOT delete the saved entry, so a transient 404 can't destroy an addressable
+// queue. Self-heal is the next successful queue Save.
+func TestShow404KeepsStateAndReturnsEmpty(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "5535", "42687")
 	f.onStatus("GET", "/playQueues/5535", 404)
@@ -563,8 +565,8 @@ func TestShow404ClearsStateAndReturnsEmpty(t *testing.T) {
 	if !reflect.DeepEqual(normalize(t, result), normalize(t, want)) {
 		t.Fatalf("result = %#v, want %#v", result, want)
 	}
-	if queuestate.Load("abc") != nil {
-		t.Fatalf("stale state not cleared: %#v", queuestate.Load("abc"))
+	if queuestate.Load("abc") == nil {
+		t.Fatalf("state must be KEPT on 404 (finding 7) — a transient 404 must not delete an addressable queue")
 	}
 }
 
@@ -769,9 +771,10 @@ func TestAddToClientNoActiveQueueReturnsResolveError(t *testing.T) {
 	}
 }
 
-// B4: a stale saved id 404s on the size-read. AddToClient clears the entry
-// and reports it as no-active-queue rather than hard-exiting.
-func TestAddToClient404ClearsStateAndReturnsNoActiveQueue(t *testing.T) {
+// C4 (finding 7): a saved id that 404s on the size-read makes AddToClient report
+// no-active-queue rather than hard-exiting — but it must NOT delete the saved
+// entry, so a transient 404 can't destroy an addressable queue.
+func TestAddToClient404KeepsStateAndReturnsNoActiveQueue(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "5582", "1")
 	f.serverIDRoute(serverMID)
@@ -783,8 +786,8 @@ func TestAddToClient404ClearsStateAndReturnsNoActiveQueue(t *testing.T) {
 	if !reflect.DeepEqual(result, want) {
 		t.Fatalf("result = %#v, want %#v", result, want)
 	}
-	if queuestate.Load("abc") != nil {
-		t.Fatalf("stale state not cleared: %#v", queuestate.Load("abc"))
+	if queuestate.Load("abc") == nil {
+		t.Fatalf("state must be KEPT on 404 (finding 7) — a transient 404 must not delete an addressable queue")
 	}
 }
 
