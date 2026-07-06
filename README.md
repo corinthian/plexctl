@@ -10,7 +10,7 @@ The Go binary is the deployed plexctl as of 2026-07-05. All 28 live gates passed
 
 The deployed binary is a static copy at `~/.local/bin/plexctl`. Deploy is a manual `cp ~/Projects/plexctl/dist/plexctl ~/.local/bin/plexctl` — never a symlink (an editable/symlinked install re-introduces the Python-era trap). Rollback: `rm ~/.local/bin/plexctl && pipx install -e ~/Projects/plex-voice` restores the frozen Python baseline.
 
-Currently tagged `v0.9.0`; `v1.0.0` is cut when the soak week closes. The post-v1 fix stream (bind-failure staging, `queue-start`, 404 state invalidation, `commandID` persistence) lands on the `post-v1-fixes` branch — the first deliberate behavior divergences from the frozen Python baseline (see Known deviations).
+Currently tagged `v0.9.0`; versioning stays parked until a fresh full soak passes. The `post-v1-fixes` branch carries the deliberate post-v1 divergences from the frozen Python baseline (see Known deviations): the initial fix stream (bind-failure staging, `queue-start`, 404 handling, `commandID` persistence) plus the C-series review-fix pass (commits C1–C7, 2026-07-06) closing the 10 findings from that day's high-effort code review — resolve-before-create, no-clobber bind-failure staging, read-path 404 no longer deleting queue state, a hardened `commandID` counter, `flock`'d queue-state writes, and the annotation/error cleanups. The branch is unmerged; a fresh soak is the next gate before any merge, version, or deploy decision.
 
 ## Known deviations from the Python original
 
