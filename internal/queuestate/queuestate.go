@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/corinthian/plexctl/internal/config"
@@ -27,6 +28,38 @@ import (
 
 func path() string {
 	return filepath.Join(config.Dir(), "queue_state.json")
+}
+
+func lockPath() string {
+	return filepath.Join(config.Dir(), "queue_state.lock")
+}
+
+// withLock runs fn while holding an exclusive flock on queue_state.lock — a
+// stable inode kept separate from queue_state.json, which is rewritten via
+// temp+rename (its inode changes every write), mirroring the commandid lock
+// pattern. It serializes the read-modify-write in Save/SaveIfAbsent/Clear so
+// two concurrent commands (e.g. iPad /remote-control plus macOS) cannot lose an
+// update. Lock-acquisition FAILURE (mkdir/open/flock error) degrades to running
+// fn unlocked: a command must never fail because a lock couldn't be taken. Each
+// mutator calls withLock exactly once and never nests, so the same-process
+// two-fd flock self-deadlock can't arise.
+func withLock(fn func()) {
+	if err := os.MkdirAll(config.Dir(), 0o755); err != nil {
+		fn()
+		return
+	}
+	lockFile, err := os.OpenFile(lockPath(), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		fn()
+		return
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		fn()
+		return
+	}
+	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
+	fn()
 }
 
 func readAll() jsonx.J {
@@ -67,13 +100,15 @@ func Save(clientMID, queueID, selectedID string) {
 	if selectedID != "" {
 		selected = selectedID
 	}
-	state := readAll()
-	state[clientMID] = jsonx.J{
-		"playQueueID":    queueID,
-		"selectedItemID": selected,
-		"savedAt":        time.Now().Unix(),
-	}
-	writeAll(state)
+	withLock(func() {
+		state := readAll()
+		state[clientMID] = jsonx.J{
+			"playQueueID":    queueID,
+			"selectedItemID": selected,
+			"savedAt":        time.Now().Unix(),
+		}
+		writeAll(state)
+	})
 }
 
 // SaveIfAbsent writes the entry only when the client has no entry yet, and
@@ -87,21 +122,25 @@ func SaveIfAbsent(clientMID, queueID, selectedID string) bool {
 	if clientMID == "" || queueID == "" {
 		return false
 	}
-	state := readAll()
-	if _, ok := state[clientMID]; ok {
-		return false
-	}
 	var selected any
 	if selectedID != "" {
 		selected = selectedID
 	}
-	state[clientMID] = jsonx.J{
-		"playQueueID":    queueID,
-		"selectedItemID": selected,
-		"savedAt":        time.Now().Unix(),
-	}
-	writeAll(state)
-	return true
+	wrote := false
+	withLock(func() {
+		state := readAll()
+		if _, ok := state[clientMID]; ok {
+			return
+		}
+		state[clientMID] = jsonx.J{
+			"playQueueID":    queueID,
+			"selectedItemID": selected,
+			"savedAt":        time.Now().Unix(),
+		}
+		writeAll(state)
+		wrote = true
+	})
+	return wrote
 }
 
 // Load mirrors queue_state.load; nil when absent.
@@ -120,9 +159,11 @@ func Clear(clientMID string) {
 	if clientMID == "" {
 		return
 	}
-	state := readAll()
-	if _, ok := state[clientMID]; ok {
-		delete(state, clientMID)
-		writeAll(state)
-	}
+	withLock(func() {
+		state := readAll()
+		if _, ok := state[clientMID]; ok {
+			delete(state, clientMID)
+			writeAll(state)
+		}
+	})
 }

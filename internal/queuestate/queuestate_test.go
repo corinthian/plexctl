@@ -2,9 +2,13 @@ package queuestate_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/queuestate"
@@ -78,4 +82,72 @@ func TestEmptyArgsAreNoOps(t *testing.T) {
 		t.Fatal("empty-arg save should be a no-op")
 	}
 	queuestate.Clear("") // must not panic
+}
+
+// C5 (finding 6): concurrent read-modify-writes on distinct mids must not lose
+// an update. Under the flock this is deterministic; without it the interleaved
+// readAll→writeAll windows drop entries. All goroutines fire from a barrier to
+// maximize overlap — the test passes reliably locked and would fail unlocked.
+func TestConcurrentSavesNoLostUpdate(t *testing.T) {
+	setup(t)
+	const n = 64
+	var start, done sync.WaitGroup
+	start.Add(1)
+	for i := 0; i < n; i++ {
+		done.Add(1)
+		go func(i int) {
+			defer done.Done()
+			start.Wait()
+			queuestate.Save(fmt.Sprintf("mid-%d", i), fmt.Sprintf("q%d", i), "s")
+		}(i)
+	}
+	start.Done()
+	done.Wait()
+
+	for i := 0; i < n; i++ {
+		if queuestate.Load(fmt.Sprintf("mid-%d", i)) == nil {
+			t.Fatalf("lost update: mid-%d absent after %d concurrent Saves", i, n)
+		}
+	}
+}
+
+// C5 (finding 6): Save genuinely serializes on queue_state.lock. The test holds
+// the flock, confirms Save blocks (does not complete or degrade past a held
+// lock), then releases and confirms Save proceeds and persists. This proves the
+// lock is real, not a no-op that would let the lost-update race back in.
+func TestSaveSerializesUnderHeldLock(t *testing.T) {
+	dir := setup(t)
+	lf, err := os.OpenFile(filepath.Join(dir, "queue_state.lock"), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		queuestate.Save("mid-1", "q1", "s1")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("Save completed while the lock was held — lock is not serializing")
+	case <-time.After(150 * time.Millisecond):
+		// expected: Save is blocked waiting on the lock
+	}
+
+	_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	_ = lf.Close()
+
+	select {
+	case <-done:
+		// Save proceeded once the lock freed
+	case <-time.After(2 * time.Second):
+		t.Fatal("Save did not complete after lock release")
+	}
+	if entry := queuestate.Load("mid-1"); entry == nil || entry["playQueueID"] != "q1" {
+		t.Fatalf("Save did not persist after lock release: %#v", entry)
+	}
 }
