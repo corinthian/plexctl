@@ -25,10 +25,11 @@ Verified by adversarial review of every module; everything not listed here match
 
 Deliberate post-v1 divergences from the Python baseline (the `post-v1-fixes` stream — failure paths and new commands, not the read-path shapes parity covers):
 
-- `queue` bind failure no longer emits a bare error: it attaches `playQueueID`/`selectedItemID`, sets `clientUnreachable: true` for transport-shaped failures, and saves queue state so the created queue is *staged* (recoverable via `queue-start`) rather than orphaned.
+- `queue` resolves the target client *before* creating the play queue (Python created first): an unresolvable or inactive client now exits without leaving an orphaned server-side queue. On a double failure (inactive client plus bad rating keys) the resolver error takes precedence.
+- `queue` bind failure no longer emits a bare error: it attaches `playQueueID`/`selectedItemID` and sets `clientUnreachable: true` for transport-shaped failures. With no queue already recorded for the client it stages the new queue and marks the output `staged: true` (recoverable via `queue-start`); when an entry already exists it is preserved with no `staged` key, so a failed bind never clobbers the bound queue — recovery there is re-running `queue` once the device is back.
 - New `queue-start` command binds the saved/staged queue to the client — the recovery path after a bind failure.
-- Stale queue state is invalidated on HTTP 404: `queue-show`, `queue-add`, `queue-clear`, and the `context` queue section clear the pruned entry and degrade gracefully instead of hard-exiting.
-- The Companion `commandID` is a flock-protected persisted counter in the config dir, not a per-process wall-clock seed, so back-to-back commands in the same second no longer collide and silently drop.
+- Stale queue reads degrade without deleting state: `queue-show`, `queue-add`, and the `context` queue section return empty / no-active-queue on HTTP 404 but keep the saved entry, so a transient 404 can't destroy an addressable queue. Only `queue-clear` still clears on 404 (idempotent success). A genuinely pruned queue's entry therefore lingers — one wasted GET per read — until the next successful `queue` create replaces it.
+- The Companion `commandID` is a flock-protected persisted counter in the config dir, not a per-process wall-clock seed, so back-to-back commands in the same second no longer collide and silently drop. It is written atomically (temp+rename), floored above the in-memory high-water mark, and self-heals a corrupt or empty counter file.
 
 ## Build
 
