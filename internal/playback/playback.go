@@ -56,54 +56,68 @@ var (
 	commandIDSeeded bool
 )
 
-// commandIDPath is the flock-protected counter file, riding
+// commandIDPath is the counter value file; commandIDLockPath is its dedicated
+// lock. The lock is a SEPARATE, stable inode because the value file is rewritten
+// via temp-file+rename (its inode changes every write) — flocking the value
+// file itself would lock an inode that's about to be replaced. Both ride
 // $PLEXCTL_CONFIG_DIR the same way queue state does.
 func commandIDPath() string {
 	return filepath.Join(config.Dir(), "commandid")
 }
 
+func commandIDLockPath() string {
+	return filepath.Join(config.Dir(), "commandid.lock")
+}
+
 // nextPersistedCommandID computes and persists the next strictly-increasing
-// commandID under an exclusive file lock, so IDs never collide across
-// concurrent CLI processes. Returns ok=false on any filesystem/lock failure
-// or a corrupt counter file, signalling the caller to fall back to the
-// in-memory epoch seed.
-func nextPersistedCommandID() (int64, bool) {
+// commandID under an exclusive lock on commandid.lock, so IDs never collide
+// across concurrent CLI processes. The next ID is floored above THREE things:
+// the wall clock, the persisted value+1, and minExclusive+1 (the caller's
+// in-memory high-water mark) — so a transient file failure that fell back to
+// the in-memory counter can never reissue a consumed ID once the file recovers
+// (finding 4). A corrupt or empty value file is treated as absent: the counter
+// reseeds from the floors and rewrites (self-healing) instead of trapping in
+// the permanent in-memory fallback (finding 3). The atomic temp+rename write is
+// LOAD-BEARING, not hygiene: cross-process monotonicity rests entirely on the
+// value file surviving intact, so it must never be left partial or empty
+// (finding 5). Returns ok=false on any filesystem/lock failure, signalling the
+// caller to fall back to the in-memory epoch seed.
+func nextPersistedCommandID(minExclusive int64) (int64, bool) {
 	if err := os.MkdirAll(config.Dir(), 0o755); err != nil {
 		return 0, false
 	}
-	f, err := os.OpenFile(commandIDPath(), os.O_RDWR|os.O_CREATE, 0o644)
+	lockFile, err := os.OpenFile(commandIDLockPath(), os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return 0, false
 	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
 		return 0, false
 	}
-	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
 
 	next := nowUnix()
-	b, err := io.ReadAll(f)
-	if err != nil {
-		return 0, false
+	if minExclusive+1 > next {
+		next = minExclusive + 1
 	}
-	if s := strings.TrimSpace(string(b)); s != "" {
-		persisted, perr := strconv.ParseInt(s, 10, 64)
-		if perr != nil {
-			// Corrupt counter file: fall back to the in-memory seed rather
-			// than trusting or clobbering it.
-			return 0, false
-		}
-		if persisted+1 > next {
-			next = persisted + 1
+	// Only a parseable value raises the floor. A read error (absent file),
+	// empty file, or corrupt (unparseable) contents all fall through as
+	// "absent" — reseed from the floors above and rewrite.
+	if b, rerr := os.ReadFile(commandIDPath()); rerr == nil {
+		if s := strings.TrimSpace(string(b)); s != "" {
+			if persisted, perr := strconv.ParseInt(s, 10, 64); perr == nil && persisted+1 > next {
+				next = persisted + 1
+			}
 		}
 	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
+	// Atomic write: temp file + rename, so the value file is never observed
+	// partial or empty (mirrors queuestate.writeAll). This is the sole
+	// guarantor of cross-process monotonicity across a crash.
+	tmp := commandIDPath() + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(next, 10)), 0o644); err != nil {
 		return 0, false
 	}
-	if err := f.Truncate(0); err != nil {
-		return 0, false
-	}
-	if _, err := f.WriteString(strconv.FormatInt(next, 10)); err != nil {
+	if err := os.Rename(tmp, commandIDPath()); err != nil {
 		return 0, false
 	}
 	return next, true
@@ -112,14 +126,16 @@ func nextPersistedCommandID() (int64, bool) {
 func nextCommandID() int64 {
 	commandIDMu.Lock()
 	defer commandIDMu.Unlock()
-	if id, ok := nextPersistedCommandID(); ok {
+	// Pass the in-memory high-water mark so the persisted path floors above any
+	// ID a prior fallback issued but couldn't persist (0 when unseeded).
+	if id, ok := nextPersistedCommandID(commandID); ok {
 		// Shadow the persisted value so a later file failure continues from
 		// here instead of reseeding from the clock.
 		commandID = id
 		commandIDSeeded = true
 		return id
 	}
-	// Fallback: counter file unreachable/corrupt — pure in-memory epoch seed
+	// Fallback: counter file unreachable — pure in-memory epoch seed
 	// (the pre-B5 behavior).
 	if !commandIDSeeded {
 		commandID = nowUnix()

@@ -202,9 +202,11 @@ func TestCommandIDPersistedMonotonicAcrossProcessesFrozenClock(t *testing.T) {
 	}
 }
 
-// B5: a corrupt counter file falls back to the in-memory epoch seed cleanly —
-// no panic, still monotonic within the process.
-func TestCommandIDCorruptFileFallsBackCleanly(t *testing.T) {
+// C3 (finding 3): a corrupt counter file is REPAIRED, not permanently fallen
+// back on. The next call returns a valid ID, rewrites the file with it, and
+// subsequent calls strictly increase — no permanent in-memory fallback that
+// would reintroduce same-second collisions across processes.
+func TestCommandIDCorruptFileSelfHeals(t *testing.T) {
 	dir := testutil.Setup(t, "http://unused")
 	if err := os.WriteFile(filepath.Join(dir, "commandid"), []byte("not-a-number"), 0o644); err != nil {
 		t.Fatal(err)
@@ -217,7 +219,78 @@ func TestCommandIDCorruptFileFallsBackCleanly(t *testing.T) {
 	id1 := nextCommandID()
 	id2 := nextCommandID()
 	if id1 <= 0 || id2 <= id1 {
-		t.Fatalf("fallback not monotonic: id1=%d id2=%d", id1, id2)
+		t.Fatalf("not monotonic after corrupt file: id1=%d id2=%d", id1, id2)
+	}
+	// Healed: the file now holds a parseable number (the last issued ID), so the
+	// corruption does not survive into the next process.
+	raw, err := os.ReadFile(filepath.Join(dir, "commandid"))
+	if err != nil {
+		t.Fatalf("reading healed commandid: %v", err)
+	}
+	healed, perr := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+	if perr != nil {
+		t.Fatalf("commandid not healed to a number: %q (%v)", raw, perr)
+	}
+	if healed != id2 {
+		t.Fatalf("healed file = %d, want last issued id %d", healed, id2)
+	}
+}
+
+// C3 (finding 4): the persisted next-ID is floored above the caller's in-memory
+// high-water mark, so a transient file failure that already issued IDs from the
+// in-memory fallback can never have one re-issued once the file recovers.
+// Tested directly on the primitive with a frozen low clock so only the floors
+// are in play.
+func TestCommandIDFloorsAboveInMemoryHighWater(t *testing.T) {
+	dir := testutil.Setup(t, "http://unused")
+	oldNow := nowUnix
+	nowUnix = func() int64 { return 50 }
+	t.Cleanup(func() { nowUnix = oldNow; resetCommandIDState() })
+
+	// Persisted value 100 → first floored to max(clock 50, 100+1, 0+1) = 101.
+	if err := os.WriteFile(filepath.Join(dir, "commandid"), []byte("100"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, ok := nextPersistedCommandID(0)
+	if !ok || first != 101 {
+		t.Fatalf("first = %d ok=%v, want 101", first, ok)
+	}
+	// A prior fallback issued up to 200 in-memory without persisting. The file
+	// still says 101, but the floor must lift next above 200 — NOT reissue 102.
+	next, ok := nextPersistedCommandID(200)
+	if !ok || next != 201 {
+		t.Fatalf("next = %d ok=%v, want 201 (floored above in-memory 200, not persisted+1)", next, ok)
+	}
+}
+
+// C3 (finding 5, kill-window): if a crash leaves the value file empty, the
+// counter reseeds from max(clock, in-memory) and self-heals. We assert ONLY
+// self-heal and process-local monotonicity. We deliberately do NOT assert the
+// reseeded value is globally safe: at the reseed instant nothing can recover
+// IDs a prior same-second process issued in-memory, so one cross-process
+// collision remains possible here — an accepted, documented residual (see the
+// locked design decision). Do not "fix" this test into a global guarantee.
+func TestCommandIDEmptyFileKillWindowSelfHeals(t *testing.T) {
+	dir := testutil.Setup(t, "http://unused")
+	if err := os.WriteFile(filepath.Join(dir, "commandid"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldNow := nowUnix
+	nowUnix = func() int64 { return 7000 }
+	t.Cleanup(func() { nowUnix = oldNow; resetCommandIDState() })
+
+	resetCommandIDState()
+	id1 := nextCommandID()
+	id2 := nextCommandID()
+	if id1 != 7000 {
+		t.Fatalf("id1 = %d, want 7000 (reseed from frozen clock on empty file)", id1)
+	}
+	if id2 <= id1 {
+		t.Fatalf("process-local monotonicity broken: id1=%d id2=%d", id1, id2)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "commandid"))
+	if _, perr := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); perr != nil {
+		t.Fatalf("empty file not healed to a number: %q", raw)
 	}
 }
 
