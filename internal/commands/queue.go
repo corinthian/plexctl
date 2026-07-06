@@ -55,11 +55,10 @@ func newQueueCmd() *cobra.Command {
 		}
 		result := playback.PlayQueue(target, jsonx.AsStr(q["playQueueID"]), jsonx.AsStr(q["selectedItemID"]))
 		// The queue exists on the server the moment Create succeeded. Surface
-		// its IDs and save state whether or not the bind succeeded, so a bind
-		// failure leaves a *staged* queue that queue-start can bind later —
-		// not an orphan the caller can't see or recover. clientUnreachable
-		// flags a transport-shaped bind failure (device didn't answer), never
-		// an HTTP-error bind. The success path stays byte-identical.
+		// its IDs so a bind failure leaves a queue the caller can see and
+		// recover, not an orphan. clientUnreachable flags a transport-shaped
+		// bind failure (device didn't answer), never an HTTP-error bind. The
+		// success path stays byte-identical.
 		result["playQueueID"] = q["playQueueID"]
 		result["selectedItemID"] = q["selectedItemID"]
 		if !jsonx.Truthy(result["ok"]) {
@@ -68,7 +67,22 @@ func newQueueCmd() *cobra.Command {
 			}
 		}
 		if mid := target["machineIdentifier"]; jsonx.Truthy(mid) {
-			queuestate.Save(jsonx.AsStr(mid), jsonx.AsStr(q["playQueueID"]), jsonx.AsStr(q["selectedItemID"]))
+			midStr := jsonx.AsStr(mid)
+			qid := jsonx.AsStr(q["playQueueID"])
+			sel := jsonx.AsStr(q["selectedItemID"])
+			if jsonx.Truthy(result["ok"]) {
+				// Bind succeeded: this IS the live queue, record it unconditionally.
+				queuestate.Save(midStr, qid, sel)
+			} else if queuestate.SaveIfAbsent(midStr, qid, sel) {
+				// Bind failed and no queue was recorded for this client: stage the
+				// new queue so queue-start can bind it later (finding 1). If an
+				// entry already exists (the bound/playing queue), SaveIfAbsent
+				// preserves it and returns false — no staged key; recovery is
+				// re-running `queue` once the device is back. staged derives from
+				// the write itself, never a separate Load, so it can't disagree
+				// with what was persisted.
+				result["staged"] = true
+			}
 		}
 		output.Out(result)
 		return nil

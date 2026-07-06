@@ -174,6 +174,109 @@ func TestQueueBindHTTP500StagesQueueWithoutClientUnreachable(t *testing.T) {
 	}
 }
 
+// C2 (finding 1): a failed bind of a NEW queue must NOT clobber the client's
+// existing (bound/playing) entry. SaveIfAbsent preserves it, the output carries
+// the new queue's IDs but NO staged key (recovery is re-running `queue`).
+func TestQueueBindFailurePreservesExistingEntryNoStaged(t *testing.T) {
+	f := newFakePMS(t)
+	f.resolvableClient(t)
+	seed := map[string]any{"mid-appletv": map[string]any{
+		"playQueueID": "111", "selectedItemID": "222", "savedAt": float64(1),
+	}}
+	seedBytes, _ := json.Marshal(seed)
+	if err := os.WriteFile(filepath.Join(f.dir, "queue_state.json"), seedBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onJSON("POST", "/playQueues", map[string]any{
+		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
+	})
+	f.on("GET", "/player/playback/playMedia", func(r *http.Request) (int, any) {
+		time.Sleep(250 * time.Millisecond)
+		return 200, nil
+	})
+	api.SetTimeoutOverride(0.05)
+	t.Cleanup(api.ClearTimeoutOverride)
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue", "123"})
+	out, _ := testutil.Capture(t, func() { _ = root.Execute() })
+	got := mustUnmarshal(t, out)
+	if got["ok"] != false {
+		t.Fatalf("ok = %#v, out=%s", got["ok"], out)
+	}
+	if _, present := got["staged"]; present {
+		t.Fatalf("staged must be ABSENT when an existing entry was preserved: %#v", got)
+	}
+	if got["playQueueID"] != "555" {
+		t.Fatalf("output must still carry the new queue's IDs: %#v", got)
+	}
+	if entry := stagedEntry(t, f); entry["playQueueID"] != "111" || entry["selectedItemID"] != "222" {
+		t.Fatalf("existing entry was clobbered: %#v", entry)
+	}
+}
+
+// C2 (finding 1): with no prior entry, a failed bind stages the new queue and
+// the output carries staged:true so queue-start knows it can recover it.
+func TestQueueBindFailureStagesWhenNoEntryEmitsStagedKey(t *testing.T) {
+	f := newFakePMS(t)
+	f.resolvableClient(t)
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onJSON("POST", "/playQueues", map[string]any{
+		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
+	})
+	f.on("GET", "/player/playback/playMedia", func(r *http.Request) (int, any) {
+		time.Sleep(250 * time.Millisecond)
+		return 200, nil
+	})
+	api.SetTimeoutOverride(0.05)
+	t.Cleanup(api.ClearTimeoutOverride)
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue", "123"})
+	out, _ := testutil.Capture(t, func() { _ = root.Execute() })
+	got := mustUnmarshal(t, out)
+	if got["staged"] != true {
+		t.Fatalf("staged must be true when a fresh queue was staged: %#v", got)
+	}
+	if entry := stagedEntry(t, f); entry["playQueueID"] != "555" {
+		t.Fatalf("staged entry = %#v", entry)
+	}
+}
+
+// C2: the bind-SUCCESS path is unchanged — it overwrites any existing entry
+// with the live queue and never sets staged.
+func TestQueueBindSuccessOverwritesExistingEntry(t *testing.T) {
+	f := newFakePMS(t)
+	f.resolvableClient(t)
+	seed := map[string]any{"mid-appletv": map[string]any{
+		"playQueueID": "111", "selectedItemID": "222", "savedAt": float64(1),
+	}}
+	seedBytes, _ := json.Marshal(seed)
+	if err := os.WriteFile(filepath.Join(f.dir, "queue_state.json"), seedBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onJSON("POST", "/playQueues", map[string]any{
+		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
+	})
+	f.onStatus("GET", "/player/playback/playMedia", 200)
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue", "123"})
+	out, _ := testutil.Capture(t, func() { _ = root.Execute() })
+	got := mustUnmarshal(t, out)
+	if got["ok"] != true {
+		t.Fatalf("ok = %#v, out=%s", got["ok"], out)
+	}
+	if _, present := got["staged"]; present {
+		t.Fatalf("success path must never set staged: %#v", got)
+	}
+	if entry := stagedEntry(t, f); entry["playQueueID"] != "555" || entry["selectedItemID"] != "999" {
+		t.Fatalf("success must overwrite existing entry with the new queue: %#v", entry)
+	}
+}
+
 // B3: queue-start is registered and wired through the full resolver; with no
 // staged queue it surfaces the no-active-queue error the skill translates.
 func TestQueueStartCommandNoStateReturnsNoActiveQueue(t *testing.T) {

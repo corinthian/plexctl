@@ -76,6 +76,34 @@ func Save(clientMID, queueID, selectedID string) {
 	writeAll(state)
 }
 
+// SaveIfAbsent writes the entry only when the client has no entry yet, and
+// returns true exactly when it wrote. The bind-failure path uses it to stage a
+// newly created queue without clobbering an existing (bound/possibly playing)
+// one — the returned bool is the single source of truth for the caller's
+// `staged` flag, so the flag and the persisted state can never disagree.
+// Empty mid/queueID is a no-op → false. It is its own read-modify-write (never
+// composed from Save) so C5's per-op lock can wrap it without self-deadlock.
+func SaveIfAbsent(clientMID, queueID, selectedID string) bool {
+	if clientMID == "" || queueID == "" {
+		return false
+	}
+	state := readAll()
+	if _, ok := state[clientMID]; ok {
+		return false
+	}
+	var selected any
+	if selectedID != "" {
+		selected = selectedID
+	}
+	state[clientMID] = jsonx.J{
+		"playQueueID":    queueID,
+		"selectedItemID": selected,
+		"savedAt":        time.Now().Unix(),
+	}
+	writeAll(state)
+	return true
+}
+
 // Load mirrors queue_state.load; nil when absent.
 func Load(clientMID string) jsonx.J {
 	if clientMID == "" {
