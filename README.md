@@ -2,11 +2,15 @@
 
 Native Go port of [plex-voice](../plex-voice)'s `plexctl` — control a Plex Media Server and an Apple TV from the command line, JSON on every call, built for scripts and LLM consumption (the `/plex` Claude Code skill).
 
-This is a behavior-frozen port: the command surface, JSON shapes, exit codes (0 ok / 1 error / 2 timeout), config file, and queue-state file are identical to the Python original. The Python repo's docs remain the reference during the transition: [DOCS.md](../plex-voice/DOCS.md), [LLM_REFERENCE.md](../plex-voice/LLM_REFERENCE.md), [STATUS.md](../plex-voice/STATUS.md). The port plan and behavior contract live in the Obsidian vault (`Projects/Subtrakt/Plexctl/Plexctl_Go_Port_Plan.md`).
+Ported as a behavior-frozen mirror: the command surface, JSON shapes, exit codes (0 ok / 1 error / 2 timeout), config file, and queue-state file match the Python original, except for the deliberate post-v1 divergences noted below. The Python repo's docs remain the reference during the transition: [DOCS.md](../plex-voice/DOCS.md), [LLM_REFERENCE.md](../plex-voice/LLM_REFERENCE.md), [STATUS.md](../plex-voice/STATUS.md). The port plan and behavior contract live in the Obsidian vault (`Projects/Subtrakt/Plexctl/Plexctl_Go_Port_Plan.md`).
 
-## Status: v0.9
+## Status: cutover complete (soak week → v1.0.0)
 
-Fully ported and tested at the unit level (httptest fakes, all frozen strings and PMS quirks pinned by tests), plus read-only parity verified against the live PMS with the Python binary side by side (`scripts/parity.sh`). Not yet cut over: the live Apple TV player gates (transport, queue playback) and live write gates (collections/playlists mutation, set-audio) run at cutover to 1.0. Until then the pipx Python install stays the deployed binary.
+The Go binary is the deployed plexctl as of 2026-07-05. All 28 live gates passed that day from the iTerm Local Network context: 24/24 direct-LAN read parity against the Python binary, the full Apple TV player sequence (transport + queue playback, including a cross-binary `queue_state.json` read where Python read the Go-written state live), scratch collection/playlist lifecycles, bulk dry-run byte-parity, and one real `set-audio` write verified and reverted. Unit coverage stays complete (httptest fakes, every frozen string and PMS quirk pinned).
+
+The deployed binary is a static copy at `~/.local/bin/plexctl`. Deploy is a manual `cp ~/Projects/plexctl/dist/plexctl ~/.local/bin/plexctl` — never a symlink (an editable/symlinked install re-introduces the Python-era trap). Rollback: `rm ~/.local/bin/plexctl && pipx install -e ~/Projects/plex-voice` restores the frozen Python baseline.
+
+Currently tagged `v0.9.0`; `v1.0.0` is cut when the soak week closes. The post-v1 fix stream (bind-failure staging, `queue-start`, 404 state invalidation, `commandID` persistence) lands on the `post-v1-fixes` branch — the first deliberate behavior divergences from the frozen Python baseline (see Known deviations).
 
 ## Known deviations from the Python original
 
@@ -17,7 +21,14 @@ Verified by adversarial review of every module; everything not listed here match
 - Usage-error wording on stderr differs (cobra vs click); exit code 2 and empty stdout match.
 - `X-Plex-Version`/`X-Plex-Platform` headers report the Go port's identity.
 - `$PLEXCTL_CONFIG_DIR` redirects `config.toml` too (Python honored it only for `queue_state.json`).
-- macOS Local Network privacy: a fresh unsigned binary gets silently denied LAN access (TCP to the PMS black-holes). At cutover the binary needs a one-time Local Network grant (or signing); until then `scripts/parity.sh` supports `GO_CONFIG_DIR` pointing at a config that routes through a loopback forwarder.
+- macOS Local Network privacy: the Local Network TCC grant attaches to the *terminal* the binary runs under. plexctl's LAN access to the PMS therefore works from iTerm — where the `/plex` skill runs — once granted; only non-iTerm background contexts (launchd, cron, a different terminal) get silently denied and black-hole TCP to the PMS. `scripts/parity.sh` supports `GO_CONFIG_DIR` for routing a sandboxed run through a loopback forwarder.
+
+Deliberate post-v1 divergences from the Python baseline (the `post-v1-fixes` stream — failure paths and new commands, not the read-path shapes parity covers):
+
+- `queue` bind failure no longer emits a bare error: it attaches `playQueueID`/`selectedItemID`, sets `clientUnreachable: true` for transport-shaped failures, and saves queue state so the created queue is *staged* (recoverable via `queue-start`) rather than orphaned.
+- New `queue-start` command binds the saved/staged queue to the client — the recovery path after a bind failure.
+- Stale queue state is invalidated on HTTP 404: `queue-show`, `queue-add`, `queue-clear`, and the `context` queue section clear the pruned entry and degrade gracefully instead of hard-exiting.
+- The Companion `commandID` is a flock-protected persisted counter in the config dir, not a per-process wall-clock seed, so back-to-back commands in the same second no longer collide and silently drop.
 
 ## Build
 
