@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,6 +169,67 @@ func TestCommandIDMonotonicAcrossCalls(t *testing.T) {
 	id2, _ := strconv.ParseInt(calls[1].query.Get("commandID"), 10, 64)
 	if id2 <= id1 {
 		t.Fatalf("commandID not strictly increasing: %d -> %d", id1, id2)
+	}
+}
+
+// resetCommandIDState simulates a fresh process: the in-memory fallback state
+// is gone, but any on-disk counter file persists.
+func resetCommandIDState() {
+	commandIDMu.Lock()
+	defer commandIDMu.Unlock()
+	commandID, commandIDSeeded = 0, false
+}
+
+// B5: two sequential "processes" sharing the counter file never repeat an ID,
+// even with the wall clock frozen — the persisted counter alone forces the
+// increment.
+func TestCommandIDPersistedMonotonicAcrossProcessesFrozenClock(t *testing.T) {
+	testutil.Setup(t, "http://unused")
+	oldNow := nowUnix
+	nowUnix = func() int64 { return 1000 }
+	t.Cleanup(func() { nowUnix = oldNow; resetCommandIDState() })
+
+	resetCommandIDState()
+	id1 := nextCommandID()
+	resetCommandIDState() // fresh process; file survives
+	id2 := nextCommandID()
+
+	if id1 != 1000 {
+		t.Fatalf("id1 = %d, want 1000 (epoch seed on empty counter file)", id1)
+	}
+	if id2 != 1001 {
+		t.Fatalf("id2 = %d, want 1001 (persisted+1 despite frozen clock)", id2)
+	}
+}
+
+// B5: a corrupt counter file falls back to the in-memory epoch seed cleanly —
+// no panic, still monotonic within the process.
+func TestCommandIDCorruptFileFallsBackCleanly(t *testing.T) {
+	dir := testutil.Setup(t, "http://unused")
+	if err := os.WriteFile(filepath.Join(dir, "commandid"), []byte("not-a-number"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldNow := nowUnix
+	nowUnix = func() int64 { return 5000 }
+	t.Cleanup(func() { nowUnix = oldNow; resetCommandIDState() })
+
+	resetCommandIDState()
+	id1 := nextCommandID()
+	id2 := nextCommandID()
+	if id1 <= 0 || id2 <= id1 {
+		t.Fatalf("fallback not monotonic: id1=%d id2=%d", id1, id2)
+	}
+}
+
+// B5: the counter file honors $PLEXCTL_CONFIG_DIR (same override queue state
+// uses), so tests and sandboxes stay isolated from the real config dir.
+func TestCommandIDRespectsConfigDir(t *testing.T) {
+	dir := testutil.Setup(t, "http://unused")
+	t.Cleanup(resetCommandIDState)
+	resetCommandIDState()
+	nextCommandID()
+	if _, err := os.Stat(filepath.Join(dir, "commandid")); err != nil {
+		t.Fatalf("commandid not written under PLEXCTL_CONFIG_DIR: %v", err)
 	}
 }
 

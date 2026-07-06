@@ -5,8 +5,11 @@
 // Direct-to-client HTTP is required for the Apple TV: proxying through PMS
 // with X-Plex-Target-Client-Identifier silently times out. commandID must be
 // monotonically increasing across CLI invocations — the Apple TV drops
-// anything at or below the last ID it processed — so it is seeded from
-// time.Now().Unix() at package init and incremented per call under a mutex.
+// anything at or below the last ID it processed — so it is drawn from a
+// flock-protected counter file in config.Dir(), guaranteeing strictly-
+// increasing IDs across concurrent processes. (The old per-process
+// time.Now().Unix() seed let two invocations in the same wall-clock second
+// issue the same ID, and the Apple TV silently dropped the second command.)
 package playback
 
 import (
@@ -18,10 +21,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/corinthian/plexctl/internal/api"
@@ -36,20 +42,89 @@ func (e *CompanionTransportError) Error() string { return e.Msg }
 
 // --- commandID -----------------------------------------------------------
 
-// Seed from epoch seconds so commandID is always increasing across
-// invocations.
+// nowUnix is a seam so tests can freeze the clock and prove the persisted
+// counter alone keeps IDs increasing.
+var nowUnix = func() int64 { return time.Now().Unix() }
+
+// commandID / commandIDSeeded back the in-memory fallback used only when the
+// counter file is unreachable or corrupt. On the happy path the file is the
+// source of truth and commandID just shadows the last issued value so a
+// mid-run file failure resumes monotonically instead of reseeding.
 var (
-	commandIDMu sync.Mutex
-	commandID   int64
+	commandIDMu     sync.Mutex
+	commandID       int64
+	commandIDSeeded bool
 )
 
-func init() {
-	commandID = time.Now().Unix()
+// commandIDPath is the flock-protected counter file, riding
+// $PLEXCTL_CONFIG_DIR the same way queue state does.
+func commandIDPath() string {
+	return filepath.Join(config.Dir(), "commandid")
+}
+
+// nextPersistedCommandID computes and persists the next strictly-increasing
+// commandID under an exclusive file lock, so IDs never collide across
+// concurrent CLI processes. Returns ok=false on any filesystem/lock failure
+// or a corrupt counter file, signalling the caller to fall back to the
+// in-memory epoch seed.
+func nextPersistedCommandID() (int64, bool) {
+	if err := os.MkdirAll(config.Dir(), 0o755); err != nil {
+		return 0, false
+	}
+	f, err := os.OpenFile(commandIDPath(), os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return 0, false
+	}
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+
+	next := nowUnix()
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return 0, false
+	}
+	if s := strings.TrimSpace(string(b)); s != "" {
+		persisted, perr := strconv.ParseInt(s, 10, 64)
+		if perr != nil {
+			// Corrupt counter file: fall back to the in-memory seed rather
+			// than trusting or clobbering it.
+			return 0, false
+		}
+		if persisted+1 > next {
+			next = persisted + 1
+		}
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return 0, false
+	}
+	if err := f.Truncate(0); err != nil {
+		return 0, false
+	}
+	if _, err := f.WriteString(strconv.FormatInt(next, 10)); err != nil {
+		return 0, false
+	}
+	return next, true
 }
 
 func nextCommandID() int64 {
 	commandIDMu.Lock()
 	defer commandIDMu.Unlock()
+	if id, ok := nextPersistedCommandID(); ok {
+		// Shadow the persisted value so a later file failure continues from
+		// here instead of reseeding from the clock.
+		commandID = id
+		commandIDSeeded = true
+		return id
+	}
+	// Fallback: counter file unreachable/corrupt — pure in-memory epoch seed
+	// (the pre-B5 behavior).
+	if !commandIDSeeded {
+		commandID = nowUnix()
+		commandIDSeeded = true
+	}
 	commandID++
 	return commandID
 }
