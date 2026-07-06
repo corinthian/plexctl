@@ -158,6 +158,24 @@ func (f *fakePMS) resolvableClient(t *testing.T) {
 	})
 }
 
+// inactiveClient wires the default_client ("Apple TV") as registered on
+// plex.tv (/devices.json) but absent from PMS /clients, so clients.Resolve
+// classifies it "registered but not active" and print-and-exits(1). Used to
+// prove `queue` resolves before it creates any server-side queue.
+func (f *fakePMS) inactiveClient(t *testing.T) {
+	t.Helper()
+	f.onJSON("GET", "/clients", map[string]any{"MediaContainer": map[string]any{}})
+	f.redirectPlexTV(t)
+	f.onJSON("GET", "/devices.json", []any{
+		map[string]any{
+			"name":       "Apple TV",
+			"product":    "Plex for Apple TV",
+			"version":    "1.0",
+			"lastSeenAt": "0",
+		},
+	})
+}
+
 // --- small assertion helpers --------------------------------------------------
 
 func trimNL(s string) string {

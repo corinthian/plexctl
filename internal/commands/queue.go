@@ -36,12 +36,23 @@ func newQueueCmd() *cobra.Command {
 	}
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		// Resolve BEFORE Create so an unresolvable/inactive client exits before
+		// any playQueue exists on the server (finding 2 — Create-then-Resolve
+		// orphaned the created queue with no IDs in output). In production
+		// Resolve print-and-exits via os.Exit, so the guard below is
+		// unreachable; under the test seam output.Exit records the code and
+		// RETURNS an empty dict, so without the guard execution would fall
+		// through into Create and leak a server-side queue. queue is the one
+		// command whose seam fall-through creates server state.
+		target := clients.Resolve(*client)
+		if len(target) == 0 {
+			return nil
+		}
 		q := queue.Create(args, shuffle, repeat)
 		if !jsonx.Truthy(q["ok"]) {
 			output.Out(q)
 			return nil
 		}
-		target := clients.Resolve(*client)
 		result := playback.PlayQueue(target, jsonx.AsStr(q["playQueueID"]), jsonx.AsStr(q["selectedItemID"]))
 		// The queue exists on the server the moment Create succeeded. Surface
 		// its IDs and save state whether or not the bind succeeded, so a bind

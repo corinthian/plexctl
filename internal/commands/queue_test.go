@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +67,39 @@ func TestQueueSavesQueueState(t *testing.T) {
 	}
 	if entry["playQueueID"] != "555" || entry["selectedItemID"] != "999" {
 		t.Fatalf("entry = %#v", entry)
+	}
+}
+
+// C1 (finding 2): with the target client registered but inactive, `queue`
+// must resolve-and-exit BEFORE creating any playQueue — zero POSTs to
+// /playQueues — so a bind-impossible client never orphans server-side state.
+// Pre-C1 Create ran first and the queue leaked with no IDs in the output.
+// The create + server-id routes are wired so a regression (Create wrongly
+// reached) would make the POST succeed and the callCount assertion fail loudly.
+func TestQueueResolvesBeforeCreateNoOrphanOnInactiveClient(t *testing.T) {
+	f := newFakePMS(t)
+	f.inactiveClient(t)
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onJSON("POST", "/playQueues", map[string]any{
+		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
+	})
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue", "123"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+
+	if got := f.countMethod("POST"); got != 0 {
+		t.Fatalf("POST count = %d, want 0 (Create must not run for an inactive client); out=%s", got, out)
+	}
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (resolver print-and-exit); out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != false {
+		t.Fatalf("ok = %#v, want false; out=%s", got["ok"], out)
+	}
+	if errStr, _ := got["error"].(string); !strings.Contains(errStr, "not active") {
+		t.Fatalf("error = %q, want the resolver 'registered but not active' message", got["error"])
 	}
 }
 
@@ -159,9 +193,13 @@ func TestQueueStartCommandNoStateReturnsNoActiveQueue(t *testing.T) {
 }
 
 func TestQueuePassesThroughCreateFailure(t *testing.T) {
-	// No "/" route registered -> GetServerMachineID fails inside
-	// queue.Create, which must short-circuit before ever resolving a client.
+	// C1 reordered Resolve ahead of Create, so the client must resolve first;
+	// with no "/" route GetServerMachineID then fails inside queue.Create and
+	// that failure passes through to the output (exit 1). (Pre-C1 this test
+	// wired no client because Create ran first — the resolve-before-create
+	// contract now requires a resolvable client for Create to be reached at all.)
 	f := newFakePMS(t)
+	f.resolvableClient(t)
 	root := commands.BuildRoot()
 	root.SetArgs([]string{"queue", "123"})
 	out, code := testutil.Capture(t, func() { _ = root.Execute() })
@@ -172,5 +210,4 @@ func TestQueuePassesThroughCreateFailure(t *testing.T) {
 	if got["ok"] != false || got["error"] != "could not retrieve server machineIdentifier" {
 		t.Fatalf("got %#v", got)
 	}
-	_ = f
 }
