@@ -220,13 +220,13 @@ func Clear(client jsonx.J) jsonx.J {
 	return jsonx.J{"ok": true}
 }
 
-// Start binds the saved/staged play queue for the client and starts it. It is
-// the recovery path after a B1 bind failure ("run it again when the device is
-// back" becomes queue-start, not a queue-recreating retry) and the second half
-// of --no-play staging. No saved entry → the same no-active-queue error the
-// skill already translates. On success the state is kept; on bind failure it
-// returns the B1 result shape (IDs + clientUnreachable for transport errors)
-// and keeps the state so it can be retried.
+// Start binds the saved/staged play queue for the client and starts it — the
+// recovery path after a bind failure ("run it again when the device is back"
+// becomes queue-start, not a queue-recreating retry). No saved entry → the
+// same no-active-queue error the skill already translates. On success the
+// state is kept; on bind failure it returns the same staged result shape as
+// queue (IDs + clientUnreachable for transport errors) and keeps the state so
+// it can be retried.
 func Start(client jsonx.J) jsonx.J {
 	var entry jsonx.J
 	if mid := client["machineIdentifier"]; jsonx.Truthy(mid) {
