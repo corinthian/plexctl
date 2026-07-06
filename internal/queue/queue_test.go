@@ -485,6 +485,44 @@ func TestShowReturnsEmptyWhenPMSReturnsEmptyMetadata(t *testing.T) {
 	}
 }
 
+// B4: a saved queue id that PMS has pruned 404s. Show clears the stale entry
+// and returns the same empty state as a never-created queue.
+func TestShow404ClearsStateAndReturnsEmpty(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "5535", "42687")
+	f.onStatus("GET", "/playQueues/5535", 404)
+
+	result := Show(appleTV())
+
+	want := jsonx.J{"ok": true, "state": "empty", "client": "Apple TV", "items": []jsonx.J{}}
+	if !reflect.DeepEqual(normalize(t, result), normalize(t, want)) {
+		t.Fatalf("result = %#v, want %#v", result, want)
+	}
+	if queuestate.Load("abc") != nil {
+		t.Fatalf("stale state not cleared: %#v", queuestate.Load("abc"))
+	}
+}
+
+// B4: a non-404 error on the queue read surfaces as an error shape (exit
+// codes preserved via the message) and does NOT clear state.
+func TestShowNon404ErrorReturnsErrorShapeAndKeepsState(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "5535", "42687")
+	f.onStatus("GET", "/playQueues/5535", 500)
+
+	result := Show(appleTV())
+
+	if result["ok"] != false {
+		t.Fatalf("result = %#v, want ok:false", result)
+	}
+	if errStr, _ := result["error"].(string); errStr == "" {
+		t.Fatalf("error missing: %#v", result)
+	}
+	if queuestate.Load("abc") == nil {
+		t.Fatalf("state must be kept on non-404 error")
+	}
+}
+
 func TestShowPopulatedMatchesGoldenAndOmitsRatingKey(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "5732", "45136")
@@ -609,6 +647,23 @@ func TestClearRemovesPersistedState(t *testing.T) {
 	}
 }
 
+// B4: clearing an already-pruned queue is idempotent success — the DELETE
+// 404s, we drop the stale entry and still report ok:true.
+func TestClear404IsIdempotentSuccessAndClearsState(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "5535", "42687")
+	f.onStatus("DELETE", "/playQueues/5535/items", 404)
+
+	result := Clear(appleTV())
+
+	if result["ok"] != true {
+		t.Fatalf("result = %#v, want ok:true", result)
+	}
+	if queuestate.Load("abc") != nil {
+		t.Fatalf("stale state not cleared: %#v", queuestate.Load("abc"))
+	}
+}
+
 func TestClearReturnsNoActiveQueueWhenStateEmpty(t *testing.T) {
 	newFakePMS(t)
 
@@ -646,6 +701,25 @@ func TestAddToClientNoActiveQueueReturnsResolveError(t *testing.T) {
 	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
 	if !reflect.DeepEqual(result, want) {
 		t.Fatalf("result = %#v, want %#v", result, want)
+	}
+}
+
+// B4: a stale saved id 404s on the size-read. AddToClient clears the entry
+// and reports it as no-active-queue rather than hard-exiting.
+func TestAddToClient404ClearsStateAndReturnsNoActiveQueue(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "5582", "1")
+	f.serverIDRoute(serverMID)
+	f.onStatus("GET", "/playQueues/5582", 404)
+
+	result := AddToClient(appleTV(), []string{"100"})
+
+	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("result = %#v, want %#v", result, want)
+	}
+	if queuestate.Load("abc") != nil {
+		t.Fatalf("stale state not cleared: %#v", queuestate.Load("abc"))
 	}
 }
 

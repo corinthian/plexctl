@@ -466,12 +466,15 @@ func TestContextIdleNowPlayingWhenSessionBelongsToOtherClient(t *testing.T) {
 }
 
 func TestContextQueueFailureDegradesSectionOnlyTopLevelTracksNowPlaying(t *testing.T) {
+	// A non-404 server error on the queue read degrades that section to
+	// ok:false but leaves the top-level ok tracking nowPlaying. (404 is a
+	// distinct path now — see TestContextStaleQueue404ClearsStateAndDegradesToEmpty.)
 	f := newFakePMS(t)
 	queuestate.Save(client1, "5594", "43652")
 	f.onJSON("/status/sessions", mc(jsonx.J{"Metadata": anyList(
 		sessionEntry(client1, "playing", "Vertigo", "movie", jsonx.J{"ratingKey": "44727"}),
 	)}))
-	f.onStatus("/playQueues/5594", 404)
+	f.onStatus("/playQueues/5594", 500)
 	f.onJSON("/status/sessions/history/all", mc(jsonx.J{"Metadata": anyList()}))
 
 	result := sessions.Context(testClient(), 5, true)
@@ -488,6 +491,48 @@ func TestContextQueueFailureDegradesSectionOnlyTopLevelTracksNowPlaying(t *testi
 	}
 	if errStr, _ := q["error"].(string); errStr == "" {
 		t.Fatalf("queue error missing: %#v", q)
+	}
+}
+
+// B4: a stale saved queue id 404s once PMS prunes the queue. Context must
+// clear the entry and degrade the queue section to empty (ok:true) rather than
+// failing the section — nowPlaying + history stay intact.
+func TestContextStaleQueue404ClearsStateAndDegradesToEmpty(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save(client1, "5594", "43652")
+	f.onJSON("/status/sessions", mc(jsonx.J{"Metadata": anyList(
+		sessionEntry(client1, "playing", "Vertigo", "movie", jsonx.J{"ratingKey": "44727"}),
+	)}))
+	f.onStatus("/playQueues/5594", 404)
+	f.onJSON("/status/sessions/history/all", mc(jsonx.J{"Metadata": anyList(
+		jsonx.J{"title": "Citizen Kane", "type": "movie", "viewedAt": float64(1778844492), "ratingKey": "44725", "duration": float64(6381245), "year": float64(1983)},
+	)}))
+
+	result := sessions.Context(testClient(), 5, true)
+
+	if result["ok"] != true {
+		t.Fatalf("top-level ok = %#v, want true", result["ok"])
+	}
+	q := result["queue"].(jsonx.J)
+	if q["ok"] != true || q["state"] != "empty" {
+		t.Fatalf("queue = %#v, want ok:true state:empty", q)
+	}
+	if q["playQueueID"] != nil {
+		t.Fatalf("playQueueID = %#v, want nil (pruned)", q["playQueueID"])
+	}
+	if queuestate.Load(client1) != nil {
+		t.Fatalf("stale state not cleared: %#v", queuestate.Load(client1))
+	}
+	// nowPlaying + history survive the pruned queue.
+	if result["nowPlaying"].(jsonx.J)["ok"] != true {
+		t.Fatalf("nowPlaying = %#v, want ok:true", result["nowPlaying"])
+	}
+	h := result["history"].(jsonx.J)
+	if h["ok"] != true {
+		t.Fatalf("history = %#v, want ok:true", h)
+	}
+	if items := h["items"].([]jsonx.J); len(items) != 1 {
+		t.Fatalf("history items = %#v, want 1", items)
 	}
 }
 

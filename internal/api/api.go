@@ -74,10 +74,13 @@ func DefaultTimeout() float64 {
 // Error mirrors PlexAPIError. Message is JSON-safe; Kind is "timeout" for
 // connect/read timeouts, "error" otherwise — batch callers retry timeouts
 // but not hard failures, and the CLI maps the distinction to exit codes
-// (2 vs 1).
+// (2 vs 1). Status carries the HTTP status for >=400 responses (0 for
+// transport/parse errors) so callers can distinguish a pruned queue (404)
+// from other failures.
 type Error struct {
 	Message string
 	Kind    string
+	Status  int
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -159,7 +162,7 @@ func Request(method, base, path string, params url.Values, timeout float64) (any
 	}
 	if resp.StatusCode >= 400 {
 		reason := http.StatusText(resp.StatusCode)
-		return nil, &Error{Message: FormatHTTPError(resp.StatusCode, resp.Header.Get("Content-Type"), string(body), reason), Kind: "error"}
+		return nil, &Error{Message: FormatHTTPError(resp.StatusCode, resp.Header.Get("Content-Type"), string(body), reason), Kind: "error", Status: resp.StatusCode}
 	}
 	if strings.TrimSpace(string(body)) == "" {
 		return jsonx.J{}, nil

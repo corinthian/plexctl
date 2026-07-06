@@ -157,6 +157,16 @@ func fetchQueue(client jsonx.J) (jsonx.J, error) {
 	}
 	data, err := api.TryGet(fmt.Sprintf("/playQueues/%s", jsonx.AsStr(qid)), nil)
 	if err != nil {
+		// A stale saved id 404s once PMS prunes the queue. Drop the entry and
+		// degrade to the empty-queue sub-object so a pruned queue never fails
+		// the whole startup bundle (nowPlaying + history stay intact).
+		var e *api.Error
+		if errors.As(err, &e) && e.Status == 404 {
+			if mid != "" {
+				queuestate.Clear(mid)
+			}
+			return jsonx.J{"state": "empty", "playQueueID": nil, "selectedItemID": nil, "items": []jsonx.J{}}, nil
+		}
 		return nil, err
 	}
 	mc := jsonx.GetMap(data, "MediaContainer")

@@ -4,6 +4,7 @@
 package queue
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 
@@ -12,6 +13,42 @@ import (
 	"github.com/corinthian/plexctl/internal/playback"
 	"github.com/corinthian/plexctl/internal/queuestate"
 )
+
+// apiStatus returns the HTTP status carried by an *api.Error (0 for
+// transport/parse errors or any non-*api.Error). A 404 on a saved-queue
+// dereference means PMS pruned the queue out from under us.
+func apiStatus(err error) int {
+	var e *api.Error
+	if errors.As(err, &e) {
+		return e.Status
+	}
+	return 0
+}
+
+// errMsg unwraps the JSON-safe message from an *api.Error, falling back to
+// the raw error string. Keeps the timeout prefix intact so output.Out still
+// maps it to exit 2.
+func errMsg(err error) string {
+	var e *api.Error
+	if errors.As(err, &e) {
+		return e.Message
+	}
+	return err.Error()
+}
+
+// clearClientState drops the persisted (mid -> queueID) entry for the client,
+// used when PMS reports the queue is gone (404).
+func clearClientState(client jsonx.J) {
+	if mid := client["machineIdentifier"]; jsonx.Truthy(mid) {
+		queuestate.Clear(jsonx.AsStr(mid))
+	}
+}
+
+// emptyState is the ok:true "no queue here" shape shared by the resolver-miss
+// and pruned-queue (404) paths.
+func emptyState(client jsonx.J) jsonx.J {
+	return jsonx.J{"ok": true, "state": "empty", "client": clientLabel(client), "items": []jsonx.J{}}
+}
 
 // flag01 renders a bool as the "1"/"0" query param PMS expects.
 func flag01(b bool) string {
@@ -112,9 +149,18 @@ func resolveQueueID(client jsonx.J) (string, jsonx.J) {
 func Show(client jsonx.J) jsonx.J {
 	qid, err := resolveQueueID(client)
 	if err != nil {
-		return jsonx.J{"ok": true, "state": "empty", "client": clientLabel(client), "items": []jsonx.J{}}
+		return emptyState(client)
 	}
-	data := api.Get("/playQueues/"+qid, nil)
+	data, gerr := api.TryGet("/playQueues/"+qid, nil)
+	if gerr != nil {
+		// PMS pruned the queue: our saved id is stale. Drop it and report the
+		// same empty state as a never-created queue (idempotent, not an error).
+		if apiStatus(gerr) == 404 {
+			clearClientState(client)
+			return emptyState(client)
+		}
+		return jsonx.J{"ok": false, "error": errMsg(gerr)}
+	}
 	mc := jsonx.GetMap(data, "MediaContainer")
 	selectedID := mc["playQueueSelectedItemID"]
 	rawItems := jsonx.MapList(mc, "Metadata")
@@ -161,10 +207,16 @@ func Clear(client jsonx.J) jsonx.J {
 	if err != nil {
 		return err
 	}
-	api.Delete("/playQueues/"+qid+"/items", nil)
-	if mid := client["machineIdentifier"]; jsonx.Truthy(mid) {
-		queuestate.Clear(jsonx.AsStr(mid))
+	if _, derr := api.TryDelete("/playQueues/"+qid+"/items", nil); derr != nil {
+		// Clearing an already-pruned queue is idempotent success — still drop
+		// the stale state entry.
+		if apiStatus(derr) == 404 {
+			clearClientState(client)
+			return jsonx.J{"ok": true}
+		}
+		return jsonx.J{"ok": false, "error": errMsg(derr)}
 	}
+	clearClientState(client)
 	return jsonx.J{"ok": true}
 }
 
@@ -217,7 +269,17 @@ func AddToClient(client jsonx.J, ratingKeys []string) jsonx.J {
 	if err != nil {
 		return err
 	}
-	expected := int(jsonx.Num(jsonx.GetMap(api.Get("/playQueues/"+qid, nil), "MediaContainer")["size"]))
+	sizeData, serr := api.TryGet("/playQueues/"+qid, nil)
+	if serr != nil {
+		// Stale saved id: the queue we meant to append to is gone. Drop the
+		// entry and report it the same way an empty resolver would.
+		if apiStatus(serr) == 404 {
+			clearClientState(client)
+			return jsonx.J{"ok": false, "error": fmt.Sprintf("no active queue on %s", clientLabel(client))}
+		}
+		return jsonx.J{"ok": false, "error": errMsg(serr)}
+	}
+	expected := int(jsonx.Num(jsonx.GetMap(sizeData, "MediaContainer")["size"]))
 	added := 0
 	for _, rk := range ratingKeys {
 		result := Add(qid, rk)
