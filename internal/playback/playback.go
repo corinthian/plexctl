@@ -184,6 +184,15 @@ func classifyTransportErr(err error) jsonx.J {
 	return jsonx.J{"ok": false, "error": "request failed: " + err.Error()}
 }
 
+// IsTransportError reports whether an error string carries one of the two
+// transport-shaped prefixes classifyTransportErr produces when the client
+// itself didn't answer (timed out or refused), as opposed to an HTTP status
+// error from a reachable client. Callers use it to set clientUnreachable only
+// when the device is genuinely unreachable — never for a 4xx/5xx bind.
+func IsTransportError(errStr string) bool {
+	return strings.HasPrefix(errStr, "request timed out") || strings.HasPrefix(errStr, "connection failed")
+}
+
 // playerCmd mirrors _player_cmd: fire-and-report Companion command, always
 // returning an {"ok": ...} dict rather than raising.
 func playerCmd(client jsonx.J, path string, extra map[string]string) jsonx.J {

@@ -42,13 +42,21 @@ func newQueueCmd() *cobra.Command {
 		}
 		target := clients.Resolve(*client)
 		result := playback.PlayQueue(target, jsonx.AsStr(q["playQueueID"]), jsonx.AsStr(q["selectedItemID"]))
-		if jsonx.Truthy(result["ok"]) {
-			result["playQueueID"] = q["playQueueID"]
-			result["selectedItemID"] = q["selectedItemID"]
-			mid := target["machineIdentifier"]
-			if jsonx.Truthy(mid) {
-				queuestate.Save(jsonx.AsStr(mid), jsonx.AsStr(q["playQueueID"]), jsonx.AsStr(q["selectedItemID"]))
+		// The queue exists on the server the moment Create succeeded. Surface
+		// its IDs and save state whether or not the bind succeeded, so a bind
+		// failure leaves a *staged* queue that queue-start can bind later —
+		// not an orphan the caller can't see or recover. clientUnreachable
+		// flags a transport-shaped bind failure (device didn't answer), never
+		// an HTTP-error bind. The success path stays byte-identical.
+		result["playQueueID"] = q["playQueueID"]
+		result["selectedItemID"] = q["selectedItemID"]
+		if !jsonx.Truthy(result["ok"]) {
+			if errStr, _ := result["error"].(string); playback.IsTransportError(errStr) {
+				result["clientUnreachable"] = true
 			}
+		}
+		if mid := target["machineIdentifier"]; jsonx.Truthy(mid) {
+			queuestate.Save(jsonx.AsStr(mid), jsonx.AsStr(q["playQueueID"]), jsonx.AsStr(q["selectedItemID"]))
 		}
 		output.Out(result)
 		return nil
