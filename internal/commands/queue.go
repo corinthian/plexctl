@@ -59,13 +59,7 @@ func newQueueCmd() *cobra.Command {
 		// recover, not an orphan. clientUnreachable flags a transport-shaped
 		// bind failure (device didn't answer), never an HTTP-error bind. The
 		// success path stays byte-identical.
-		result["playQueueID"] = q["playQueueID"]
-		result["selectedItemID"] = q["selectedItemID"]
-		if !jsonx.Truthy(result["ok"]) {
-			if errStr, _ := result["error"].(string); playback.IsTransportError(errStr) {
-				result["clientUnreachable"] = true
-			}
-		}
+		queue.AnnotateBind(result, jsonx.AsStr(q["playQueueID"]), jsonx.AsStr(q["selectedItemID"]))
 		if mid := target["machineIdentifier"]; jsonx.Truthy(mid) {
 			midStr := jsonx.AsStr(mid)
 			qid := jsonx.AsStr(q["playQueueID"])

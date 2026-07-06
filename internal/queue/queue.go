@@ -25,15 +25,25 @@ func apiStatus(err error) int {
 	return 0
 }
 
-// errMsg unwraps the JSON-safe message from an *api.Error, falling back to
-// the raw error string. Keeps the timeout prefix intact so output.Out still
-// maps it to exit 2.
-func errMsg(err error) string {
-	var e *api.Error
-	if errors.As(err, &e) {
-		return e.Message
+// noActiveQueue is the shared ok:false error for a client with no resolvable
+// saved queue. The literal lives here exactly once (resolveQueueID, Start, and
+// AddToClient all route through it).
+func noActiveQueue(client jsonx.J) jsonx.J {
+	return jsonx.J{"ok": false, "error": fmt.Sprintf("no active queue on %s", clientLabel(client))}
+}
+
+// AnnotateBind attaches the queue's IDs to a bind result and, on a transport-
+// shaped failure (the device didn't answer), flags clientUnreachable. Shared by
+// the queue command's RunE and queue.Start so both surface a bind outcome
+// identically. It never sets clientUnreachable for an HTTP-status bind error.
+func AnnotateBind(result jsonx.J, queueID, selectedID string) {
+	result["playQueueID"] = queueID
+	result["selectedItemID"] = selectedID
+	if !jsonx.Truthy(result["ok"]) {
+		if errStr, _ := result["error"].(string); playback.IsTransportError(errStr) {
+			result["clientUnreachable"] = true
+		}
 	}
-	return err.Error()
 }
 
 // clearClientState drops the persisted (mid -> queueID) entry for the client,
@@ -141,7 +151,7 @@ func resolveQueueID(client jsonx.J) (string, jsonx.J) {
 	if entry != nil && jsonx.Truthy(entry["playQueueID"]) {
 		return jsonx.AsStr(entry["playQueueID"]), nil
 	}
-	return "", jsonx.J{"ok": false, "error": fmt.Sprintf("no active queue on %s", clientLabel(client))}
+	return "", noActiveQueue(client)
 }
 
 // Show mirrors queue.show (empty queue is ok:true, state empty). An
@@ -162,7 +172,7 @@ func Show(client jsonx.J) jsonx.J {
 		if apiStatus(gerr) == 404 {
 			return emptyState(client)
 		}
-		return jsonx.J{"ok": false, "error": errMsg(gerr)}
+		return jsonx.J{"ok": false, "error": gerr.Error()}
 	}
 	mc := jsonx.GetMap(data, "MediaContainer")
 	selectedID := mc["playQueueSelectedItemID"]
@@ -217,7 +227,7 @@ func Clear(client jsonx.J) jsonx.J {
 			clearClientState(client)
 			return jsonx.J{"ok": true}
 		}
-		return jsonx.J{"ok": false, "error": errMsg(derr)}
+		return jsonx.J{"ok": false, "error": derr.Error()}
 	}
 	clearClientState(client)
 	return jsonx.J{"ok": true}
@@ -236,18 +246,12 @@ func Start(client jsonx.J) jsonx.J {
 		entry = queuestate.Load(jsonx.AsStr(mid))
 	}
 	if entry == nil || !jsonx.Truthy(entry["playQueueID"]) {
-		return jsonx.J{"ok": false, "error": fmt.Sprintf("no active queue on %s", clientLabel(client))}
+		return noActiveQueue(client)
 	}
 	queueID := jsonx.AsStr(entry["playQueueID"])
 	selectedItemID := jsonx.AsStr(entry["selectedItemID"])
 	result := playback.PlayQueue(client, queueID, selectedItemID)
-	result["playQueueID"] = queueID
-	result["selectedItemID"] = selectedItemID
-	if !jsonx.Truthy(result["ok"]) {
-		if errStr, _ := result["error"].(string); playback.IsTransportError(errStr) {
-			result["clientUnreachable"] = true
-		}
-	}
+	AnnotateBind(result, queueID, selectedItemID)
 	return result
 }
 
@@ -307,9 +311,9 @@ func AddToClient(client jsonx.J, ratingKeys []string) jsonx.J {
 		// addressable queue (finding 7); the next successful queue Save
 		// self-heals a genuinely stale entry.
 		if apiStatus(serr) == 404 {
-			return jsonx.J{"ok": false, "error": fmt.Sprintf("no active queue on %s", clientLabel(client))}
+			return noActiveQueue(client)
 		}
-		return jsonx.J{"ok": false, "error": errMsg(serr)}
+		return jsonx.J{"ok": false, "error": serr.Error()}
 	}
 	expected := int(jsonx.Num(jsonx.GetMap(sizeData, "MediaContainer")["size"]))
 	added := 0
