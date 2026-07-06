@@ -15,6 +15,7 @@ func init() {
 	Register(func(root *cobra.Command) {
 		root.AddCommand(
 			newQueueCmd(),
+			newQueueStartCmd(),
 			newQueueShowCmd(),
 			newQueueShuffleCmd(),
 			newQueueUnshuffleCmd(),
@@ -63,6 +64,21 @@ func newQueueCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&shuffle, "shuffle", false, "Shuffle the queue before playing")
 	cmd.Flags().BoolVar(&repeat, "repeat", false, "Repeat the queue when finished")
+	return cmd
+}
+
+func newQueueStartCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "queue-start",
+		Short: "Bind the saved/staged play queue to the client and start playing (recovery after a bind failure).",
+		Args:  cobra.NoArgs,
+	}
+	client := addClientFlag(cmd)
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		// Binding needs a live client with a baseurl, so use the full resolver.
+		output.Out(queue.Start(clients.Resolve(*client)))
+		return nil
+	}
 	return cmd
 }
 

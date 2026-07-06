@@ -220,6 +220,34 @@ func Clear(client jsonx.J) jsonx.J {
 	return jsonx.J{"ok": true}
 }
 
+// Start binds the saved/staged play queue for the client and starts it. It is
+// the recovery path after a B1 bind failure ("run it again when the device is
+// back" becomes queue-start, not a queue-recreating retry) and the second half
+// of --no-play staging. No saved entry → the same no-active-queue error the
+// skill already translates. On success the state is kept; on bind failure it
+// returns the B1 result shape (IDs + clientUnreachable for transport errors)
+// and keeps the state so it can be retried.
+func Start(client jsonx.J) jsonx.J {
+	var entry jsonx.J
+	if mid := client["machineIdentifier"]; jsonx.Truthy(mid) {
+		entry = queuestate.Load(jsonx.AsStr(mid))
+	}
+	if entry == nil || !jsonx.Truthy(entry["playQueueID"]) {
+		return jsonx.J{"ok": false, "error": fmt.Sprintf("no active queue on %s", clientLabel(client))}
+	}
+	queueID := jsonx.AsStr(entry["playQueueID"])
+	selectedItemID := jsonx.AsStr(entry["selectedItemID"])
+	result := playback.PlayQueue(client, queueID, selectedItemID)
+	result["playQueueID"] = queueID
+	result["selectedItemID"] = selectedItemID
+	if !jsonx.Truthy(result["ok"]) {
+		if errStr, _ := result["error"].(string); playback.IsTransportError(errStr) {
+			result["clientUnreachable"] = true
+		}
+	}
+	return result
+}
+
 // RemoveItem mirrors queue.remove_item.
 func RemoveItem(client jsonx.J, itemID string) jsonx.J {
 	qid, err := resolveQueueID(client)

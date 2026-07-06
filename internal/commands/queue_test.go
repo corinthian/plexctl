@@ -140,6 +140,24 @@ func TestQueueBindHTTP500StagesQueueWithoutClientUnreachable(t *testing.T) {
 	}
 }
 
+// B3: queue-start is registered and wired through the full resolver; with no
+// staged queue it surfaces the no-active-queue error the skill translates.
+func TestQueueStartCommandNoStateReturnsNoActiveQueue(t *testing.T) {
+	f := newFakePMS(t)
+	f.resolvableClient(t)
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue-start"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != false || got["error"] != "no active queue on Apple TV" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
 func TestQueuePassesThroughCreateFailure(t *testing.T) {
 	// No "/" route registered -> GetServerMachineID fails inside
 	// queue.Create, which must short-circuit before ever resolving a client.

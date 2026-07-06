@@ -30,6 +30,7 @@ type fakePMS struct {
 	mu     sync.Mutex
 	calls  []capturedReq
 	routes map[string]map[string]func(r *http.Request) (int, any)
+	srv    *httptest.Server
 }
 
 func newFakePMS(t *testing.T) *fakePMS {
@@ -57,6 +58,7 @@ func newFakePMS(t *testing.T) *fakePMS {
 		_ = json.NewEncoder(w).Encode(body)
 	}))
 	t.Cleanup(srv.Close)
+	f.srv = srv
 	testutil.Setup(t, srv.URL)
 	return f
 }
@@ -329,6 +331,69 @@ func TestCreateMultiKeyMidLoopFailureRollsBack(t *testing.T) {
 	}
 	if got := f.callCount("DELETE", "/playQueues/999"); got != 1 {
 		t.Fatalf("rollback DELETE calls = %d, want 1", got)
+	}
+}
+
+// --- Start (queue-start, B3) --------------------------------------------------
+
+// appleTVOn is appleTV() with its Companion baseurl pointed at a live test
+// server so PlayQueue's bind lands somewhere real.
+func appleTVOn(baseurl string) jsonx.J {
+	return jsonx.J{"machineIdentifier": "abc", "name": "Apple TV", "baseurl": baseurl}
+}
+
+func TestStartNoStateReturnsNoActiveQueue(t *testing.T) {
+	newFakePMS(t) // no saved state
+
+	result := Start(appleTV())
+
+	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
+	if !reflect.DeepEqual(result, want) {
+		t.Fatalf("result = %#v, want %#v", result, want)
+	}
+}
+
+func TestStartHappyPathBindsSavedQueue(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "555", "999")
+	f.serverIDRoute(serverMID)
+	f.onStatus("GET", "/player/playback/playMedia", 200)
+
+	result := Start(appleTVOn(f.srv.URL))
+
+	if result["ok"] != true {
+		t.Fatalf("result = %#v, want ok:true", result)
+	}
+	if result["playQueueID"] != "555" || result["selectedItemID"] != "999" {
+		t.Fatalf("result = %#v, want IDs echoed", result)
+	}
+	q := f.lastQuery("GET", "/player/playback/playMedia")
+	if q.Get("key") != "/playQueues/555" {
+		t.Fatalf("key = %q, want /playQueues/555", q.Get("key"))
+	}
+	if q.Get("playQueueID") != "555" || q.Get("playQueueSelectedItemID") != "999" {
+		t.Fatalf("playMedia bound wrong queue: %v", q)
+	}
+}
+
+func TestStartTransportFailurePreservesStateAndFlagsUnreachable(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "555", "999")
+	f.serverIDRoute(serverMID)
+	// Companion baseurl points at a dead port -> "connection failed:".
+	result := Start(appleTVOn("http://127.0.0.1:1"))
+
+	if result["ok"] != false {
+		t.Fatalf("result = %#v, want ok:false", result)
+	}
+	if result["clientUnreachable"] != true {
+		t.Fatalf("clientUnreachable = %#v, want true", result["clientUnreachable"])
+	}
+	if result["playQueueID"] != "555" || result["selectedItemID"] != "999" {
+		t.Fatalf("result = %#v, want IDs echoed", result)
+	}
+	if queuestate.Load("abc") == nil {
+		t.Fatalf("staged state must be kept for retry")
 	}
 }
 
