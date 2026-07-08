@@ -1,2 +1,16 @@
-dist/
+# Build & test artifacts
+/dist/
 *.test
+*.out
+/plexctl
+
+# Local config & secrets — config.toml holds the Plex token
+config.toml
+/.config/
+
+# macOS
+.DS_Store
+._*
+
+# Editor
+*.swp
