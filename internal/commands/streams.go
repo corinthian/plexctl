@@ -43,7 +43,7 @@ metadata chunk completes, so partial progress survives a killed caller.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			show := args[0]
 			if strings.TrimSpace(show) == "" {
-				output.Out(jsonx.J{"ok": false, "error": "show cannot be empty"})
+				output.Usage("show cannot be empty")
 				return nil
 			}
 			var seasonPtr *int

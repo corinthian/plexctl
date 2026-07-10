@@ -1,6 +1,11 @@
 // Package output owns the stdout JSON contract and exit-code discipline.
-// Every CLI invocation writes exactly one line of JSON (plus NDJSON rows when
-// streaming) and exits 0 on success, 1 on failure, 2 on request timeout.
+// Every path through this package writes exactly one line of JSON to stdout
+// and exits 0 on success, 1 on failure, 2 on request timeout, 64 on a usage
+// or validation error. NDJSON commands emit many lines by design — one per
+// row plus a summary — which is not an exception to "one line," just a
+// caller that calls Print repeatedly. The one deliberate exception is
+// cobra's own --help/--version handling, which bypasses this package
+// entirely and prints non-JSON text at exit 0.
 package output
 
 import (
@@ -45,6 +50,14 @@ func Out(result jsonx.J) {
 func Fail(msg string) {
 	Print(jsonx.J{"ok": false, "error": msg})
 	Exit(1)
+}
+
+// Usage prints the standard error envelope and exits 64 (EX_USAGE): a
+// malformed invocation — bad flag value, empty required argument — that a
+// retry can never fix without the caller changing the command.
+func Usage(msg string) {
+	Print(jsonx.J{"ok": false, "error": msg})
+	Exit(64)
 }
 
 // EmitNDJSON mirrors cli._emit_ndjson: one JSON object per row as produced

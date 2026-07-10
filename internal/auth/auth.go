@@ -38,8 +38,11 @@ func randomClientIDSuffix() string {
 // classifyAuthTransport mirrors auth.py's exception ladder, which — unlike
 // api.py's — catches ConnectionError BEFORE Timeout. requests'
 // ConnectTimeout subclasses ConnectionError, so a connect-phase timeout is
-// "connection failed" here; only read timeouts are "auth request timed out".
-// The sign-in client uses a bounded dialer so dial-phase stalls surface as
+// "connection failed" here; only read timeouts get the standard
+// "request timed out" prefix (output.Out's exit-2 match, shared with every
+// other command — auth used to spell this "auth request timed out", the
+// third and last of the package's now-unified timeout shapes). The
+// sign-in client uses a bounded dialer so dial-phase stalls surface as
 // dial op-errors rather than the phase-blind Client.Timeout error.
 func classifyAuthTransport(err error) string {
 	var opErr *net.OpError
@@ -48,7 +51,7 @@ func classifyAuthTransport(err error) string {
 	}
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
-		return "auth request timed out: " + err.Error()
+		return "request timed out: " + err.Error()
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
@@ -140,13 +143,13 @@ func Login() {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		output.Fail(classifyAuthTransport(err))
+		output.Out(jsonx.J{"ok": false, "error": classifyAuthTransport(err)})
 		return
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		output.Fail(classifyAuthTransport(err))
+		output.Out(jsonx.J{"ok": false, "error": classifyAuthTransport(err)})
 		return
 	}
 	if resp.StatusCode >= 400 {

@@ -7,13 +7,13 @@ import (
 	"github.com/corinthian/plexctl/internal/testutil"
 )
 
-func TestSearchEmptyQueryExitsOne(t *testing.T) {
+func TestSearchEmptyQueryExitsUsage(t *testing.T) {
 	_ = newFakePMS(t)
 	root := commands.BuildRoot()
 	root.SetArgs([]string{"search", "   "})
 	out, code := testutil.Capture(t, func() { _ = root.Execute() })
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1; out=%s", code, out)
+	if code != 64 {
+		t.Fatalf("exit code = %d, want 64; out=%s", code, out)
 	}
 	got := mustUnmarshal(t, out)
 	if got["ok"] != false || got["error"] != "query cannot be empty" {

@@ -4,9 +4,6 @@
 package commands
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/spf13/cobra"
 
 	"github.com/corinthian/plexctl/internal/api"
@@ -32,8 +29,9 @@ func BuildRoot() *cobra.Command {
 		Long: `Plex Media Server control CLI — output is JSON, designed for LLM consumption.
 
 All commands emit a JSON object with an "ok" boolean. On failure, "error"
-contains a human-readable message. Exit code is 1 on failure, 2 when the
-failure was a request timeout.`,
+contains a human-readable message. Exit code is 0 on success, 1 on a domain
+failure, 2 when the failure was a request timeout, 64 on a usage or
+validation error (malformed invocation — never retry, fix the command).`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -50,12 +48,14 @@ failure was a request timeout.`,
 	return root
 }
 
-// Execute runs the CLI. Argument/usage errors exit 2 (click's UsageError
-// convention, which the Python CLI inherited); domain failures exit via
-// output.Out's 1/2 discipline before cobra ever sees an error.
+// Execute runs the CLI. Argument/usage errors that reach cobra as a RunE
+// error — cobra's own arg-count/unknown-flag rejections, and every
+// hand-rolled validator (choiceError, rate/volume/history-limit range
+// checks) that returns an error instead of calling output directly — all
+// exit 64 through output.Usage. Domain failures exit via output.Out's 1/2
+// discipline before cobra ever sees an error.
 func Execute() {
 	if err := BuildRoot().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error: "+err.Error())
-		output.Exit(2)
+		output.Usage(err.Error())
 	}
 }

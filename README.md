@@ -29,14 +29,15 @@ Groups: auth, clients, transport (play/pause/stop/next/prev/seek/volume), search
 ## Exit codes
 
 - `0` — success
-- `1` — error
-- `2` — timeout
+- `1` — error (domain failure, HTTP status, unreachable client) — not retryable as-is
+- `2` — request timed out — safe to retry once
+- `64` — usage or validation error (malformed invocation) — never retry; fix the command
 
 ## Behavior notes
 
 - JSON text form: keys are sorted, no `", "` separators, em-dashes emitted as UTF-8. Identical after parsing — the `/plex` skill and jq consumers are unaffected.
 - Inputs that never occur in normal use (malformed PMS payload shapes, a `queue_state.json` of the wrong JSON type) degrade gracefully — an empty result or a standard JSON error, never a crash.
-- Usage errors print a cobra-style message to stderr; exit code 2, empty stdout.
+- Usage errors — bad flag value, empty required argument, unknown flag — print one JSON line to stdout and exit 64.
 - `X-Plex-Version`/`X-Plex-Platform` headers report plexctl's own identity.
 - macOS Local Network privacy: the Local Network TCC grant attaches to the *terminal* the binary runs under. plexctl's LAN access to the PMS works once a terminal has been granted; background contexts (launchd, cron, a different terminal) get silently denied and black-hole TCP to the PMS.
 - `queue` resolves the target client *before* creating the play queue: an unresolvable or inactive client exits without leaving an orphaned server-side queue. On a double failure (inactive client plus bad rating keys) the resolver error takes precedence.

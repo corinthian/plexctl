@@ -43,7 +43,7 @@ Use --min-score to control PMS relevance filtering (0 disables).`,
 			}
 			query := args[0]
 			if strings.TrimSpace(query) == "" {
-				output.Out(jsonx.J{"ok": false, "error": "query cannot be empty"})
+				output.Usage("query cannot be empty")
 				return nil
 			}
 			ms := minScore
@@ -230,7 +230,7 @@ only, --ndjson to stream line-delimited rows for batch callers.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			show := args[0]
 			if strings.TrimSpace(show) == "" {
-				output.Out(jsonx.J{"ok": false, "error": "show cannot be empty"})
+				output.Usage("show cannot be empty")
 				return nil
 			}
 			var seasonPtr *int
