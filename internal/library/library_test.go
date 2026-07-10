@@ -154,7 +154,7 @@ func TestSearchVoiceHitShortCircuitsFallback(t *testing.T) {
 	)))
 	f.onJSON("/hubs/search", hubResp()) // must not be hit
 
-	results := library.Search("dune", "", 1.0)
+	results := library.Search("rocky", "", 1.0)
 
 	if got := titles(results); len(got) != 1 || got[0] != "Real Match" {
 		t.Fatalf("results = %v, want [Real Match]", got)
@@ -172,7 +172,7 @@ func TestSearchVoiceErrorFallsBackToPlainHub(t *testing.T) {
 	f.onStatus("/hubs/search/voice", 500)
 	f.onJSON("/hubs/search", hubResp(hub("movie", jsonx.J{"title": "Real", "ratingKey": "1", "score": "2.0"})))
 
-	results := library.Search("dune", "", 1.0)
+	results := library.Search("rocky", "", 1.0)
 
 	if got := titles(results); len(got) != 1 || got[0] != "Real" {
 		t.Fatalf("results = %v, want [Real]", got)
@@ -191,7 +191,7 @@ func TestSearchVoiceEmptyAfterFilterFallsBack(t *testing.T) {
 		jsonx.J{"title": "Junk2", "ratingKey": "10", "score": "0.4"},
 	)))
 
-	results := library.Search("dune", "", 1.0)
+	results := library.Search("rocky", "", 1.0)
 
 	if got := titles(results); len(got) != 1 || got[0] != "Real" {
 		t.Fatalf("results = %v, want [Real]", got)
@@ -200,8 +200,8 @@ func TestSearchVoiceEmptyAfterFilterFallsBack(t *testing.T) {
 		t.Fatal("expected cascade through both endpoints")
 	}
 	q := f.lastQuery("/hubs/search")
-	if q.Get("query") != "dune" || q.Get("limit") != "10" {
-		t.Fatalf("fallback params = %v, want query=dune&limit=10", q)
+	if q.Get("query") != "rocky" || q.Get("limit") != "10" {
+		t.Fatalf("fallback params = %v, want query=rocky&limit=10", q)
 	}
 	if q.Has("type") {
 		t.Fatalf("fallback params carried unwanted type= for unfiltered search: %v", q)
