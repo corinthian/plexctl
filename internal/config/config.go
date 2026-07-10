@@ -44,19 +44,32 @@ func Path() string {
 // the standard JSON error and exits 1 — a hand-edited config cannot brick
 // the CLI with a stack trace.
 func Load() jsonx.J {
-	b, err := os.ReadFile(Path())
+	m, err := TryLoad()
 	if err != nil {
-		return jsonx.J{}
-	}
-	var m map[string]any
-	if err := toml.Unmarshal(b, &m); err != nil {
 		output.Fail(fmt.Sprintf("invalid config at %s: %v — run plexctl auth login", Path(), err))
 		return jsonx.J{} // reached only when output.Exit is a test seam
 	}
-	if m == nil {
-		return jsonx.J{}
-	}
 	return m
+}
+
+// TryLoad parses config.toml without Load's print-and-exit failure mode.
+// Missing file → empty map, nil error (same as Load). Malformed TOML →
+// nil map, non-nil error, instead of aborting — auth login's config-merge
+// step needs to tolerate and repair a corrupt file, which Load's abort
+// would defeat (running login to fix a bad config would itself abort).
+func TryLoad() (jsonx.J, error) {
+	b, err := os.ReadFile(Path())
+	if err != nil {
+		return jsonx.J{}, nil
+	}
+	var m map[string]any
+	if err := toml.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	if m == nil {
+		return jsonx.J{}, nil
+	}
+	return m, nil
 }
 
 // StringOr is Python `cfg.get(key, default)` for string-valued keys: the

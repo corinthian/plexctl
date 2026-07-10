@@ -74,6 +74,30 @@ func TestLoadInvalidTOMLExitsOne(t *testing.T) {
 	}
 }
 
+// TestTryLoadInvalidTOMLReturnsErrorInsteadOfExiting pins W5's second
+// trap: Load's print-and-exit on malformed TOML would make `auth login`
+// abort while trying to repair the very file that's corrupt. TryLoad
+// reports the error instead of exiting, so the merge step can tolerate it.
+func TestTryLoadInvalidTOMLReturnsErrorInsteadOfExiting(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("not = = toml"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, code := testutil.Capture(t, func() {
+		m, err := config.TryLoad()
+		if err == nil {
+			t.Fatal("expected a parse error, got nil")
+		}
+		if m != nil {
+			t.Fatalf("map = %#v, want nil on error", m)
+		}
+	})
+	if code != -1 {
+		t.Fatalf("exit = %d, want -1 (TryLoad never calls output.Exit); out=%s", code, out)
+	}
+}
+
 func TestRequireMissingExitsOne(t *testing.T) {
 	t.Setenv("PLEXCTL_CONFIG_DIR", t.TempDir())
 	out, code := testutil.Capture(t, func() { config.Require("token") })
