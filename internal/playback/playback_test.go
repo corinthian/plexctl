@@ -236,6 +236,30 @@ func TestCommandIDCorruptFileSelfHeals(t *testing.T) {
 	}
 }
 
+// TestNextPersistedCommandIDRemovesTmpFileOnRenameFailure pins W13: a
+// stale commandid.tmp left behind on a failed rename would sit on a fixed
+// filename that could collide with or mask the next write's own temp file.
+// Force the rename to fail by pre-creating a non-empty directory at the
+// destination path.
+func TestNextPersistedCommandIDRemovesTmpFileOnRenameFailure(t *testing.T) {
+	dir := testutil.Setup(t, "http://unused")
+	if err := os.Mkdir(commandIDPath(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(commandIDPath(), "occupied"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(resetCommandIDState)
+
+	_, ok := nextPersistedCommandID(0)
+	if ok {
+		t.Fatal("expected ok=false after a rename failure")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "commandid.tmp")); !os.IsNotExist(statErr) {
+		t.Fatalf("leftover commandid.tmp after failed rename: statErr=%v", statErr)
+	}
+}
+
 // C3 (finding 4): the persisted next-ID is floored above the caller's in-memory
 // high-water mark, so a transient file failure that already issued IDs from the
 // in-memory fallback can never have one re-issued once the file recovers.

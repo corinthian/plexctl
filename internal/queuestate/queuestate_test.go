@@ -98,6 +98,32 @@ func TestWriteFailuresPropagateInsteadOfSilentlyDiscarding(t *testing.T) {
 	}
 }
 
+// TestWriteAllRemovesTmpFileOnRenameFailure pins W13: writeAll's rename
+// step left a stale queue_state.json.tmp behind on failure — a fixed
+// filename that would silently mask the next write's own temp file
+// creation racing with leftover cruft. Force the rename to fail by
+// pre-creating a non-empty directory at the destination path (WriteFile
+// on the .tmp path still succeeds; Rename onto a non-empty directory
+// does not).
+func TestWriteAllRemovesTmpFileOnRenameFailure(t *testing.T) {
+	dir := setup(t)
+	statePath := filepath.Join(dir, "queue_state.json")
+	if err := os.Mkdir(statePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(statePath, "occupied"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := queuestate.Save("mid-1", "q1", "s1")
+	if err == nil {
+		t.Fatal("expected a rename error, got nil")
+	}
+	if _, statErr := os.Stat(statePath + ".tmp"); !os.IsNotExist(statErr) {
+		t.Fatalf("leftover .tmp file after failed rename: statErr=%v", statErr)
+	}
+}
+
 func TestEmptyArgsAreNoOps(t *testing.T) {
 	setup(t)
 	queuestate.Save("", "5", "1")

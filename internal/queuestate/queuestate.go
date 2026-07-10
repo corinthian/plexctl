@@ -84,7 +84,11 @@ func writeAll(state jsonx.J) error {
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp) // best-effort: don't leave a stale .tmp behind on a failed rename
+		return err
+	}
+	return nil
 }
 
 // Save mirrors queue_state.save: no-op on empty mid/queueID; selectedID ""

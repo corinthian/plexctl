@@ -118,6 +118,7 @@ func nextPersistedCommandID(minExclusive int64) (int64, bool) {
 		return 0, false
 	}
 	if err := os.Rename(tmp, commandIDPath()); err != nil {
+		_ = os.Remove(tmp) // best-effort: don't leave a stale .tmp behind on a failed rename
 		return 0, false
 	}
 	return next, true
