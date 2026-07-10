@@ -33,4 +33,3 @@ func TestRateRangeValidation(t *testing.T) {
 		t.Fatalf("expected a usage error for RATING out of range, got nil")
 	}
 }
-

@@ -132,8 +132,8 @@ func TestMergeClientsInactiveRegisteredDevice(t *testing.T) {
 
 func TestMergeClientsSkipsNamelessActiveEntries(t *testing.T) {
 	active := []jsonx.J{
-		activeEntry("", "mid-x", "h", 1),   // no name key
-		activeEntry("", "mid-y", "h2", 2),  // present but this helper omits empty names too
+		activeEntry("", "mid-x", "h", 1),  // no name key
+		activeEntry("", "mid-y", "h2", 2), // present but this helper omits empty names too
 		activeEntry("Apple TV", "mid-1", "h3", 3),
 	}
 	// Explicitly cover the "name": "" case distinctly from a missing key.

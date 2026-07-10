@@ -20,8 +20,8 @@ import (
 
 // Stdout and Exit are seams for tests; production code never overrides them.
 var (
-	Stdout io.Writer  = os.Stdout
-	Exit   func(int)  = os.Exit
+	Stdout io.Writer = os.Stdout
+	Exit   func(int) = os.Exit
 )
 
 // Print emits one JSON line with no exit-code check — for cli paths that

@@ -537,10 +537,10 @@ func intPtr(v int) *int { return &v }
 func TestListSectionShowsFilteredOnLeafCountersNotPlayHistory(t *testing.T) {
 	f := newFakePMS(t)
 	items := []jsonx.J{
-		showItem("1961", "Speed Racer", 26, 26, nil), // fully watched, never "played"
-		showItem("2001", "The Office", 8, 0, intPtr(38)),           // unwatched but has play history
-		showItem("2002", "The Simpsons", 6, 2, intPtr(9)),      // partial
-		showItem("2003", "Columbo", 10, 0, nil),                // fully unwatched, no history
+		showItem("1961", "Speed Racer", 26, 26, nil),      // fully watched, never "played"
+		showItem("2001", "The Office", 8, 0, intPtr(38)),  // unwatched but has play history
+		showItem("2002", "The Simpsons", 6, 2, intPtr(9)), // partial
+		showItem("2003", "Columbo", 10, 0, nil),           // fully unwatched, no history
 	}
 	f.onJSON("/library/sections/3/all", metaResp(items...))
 

@@ -107,13 +107,13 @@ func (e *Error) Error() string { return e.Message }
 // is required on every PMS request or /clients returns an empty list.
 func Headers(token, clientID string) map[string]string {
 	return map[string]string{
-		"X-Plex-Product":            "plexctl",
-		"X-Plex-Version":            Version,
-		"X-Plex-Platform":           "Go",
-		"X-Plex-Provides":           "controller",
-		"Accept":                    "application/json",
-		"X-Plex-Token":              token,
-		"X-Plex-Client-Identifier":  clientID,
+		"X-Plex-Product":           "plexctl",
+		"X-Plex-Version":           Version,
+		"X-Plex-Platform":          "Go",
+		"X-Plex-Provides":          "controller",
+		"Accept":                   "application/json",
+		"X-Plex-Token":             token,
+		"X-Plex-Client-Identifier": clientID,
 	}
 }
 
