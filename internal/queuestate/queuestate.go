@@ -43,23 +43,20 @@ func lockPath() string {
 // fn unlocked: a command must never fail because a lock couldn't be taken. Each
 // mutator calls withLock exactly once and never nests, so the same-process
 // two-fd flock self-deadlock can't arise.
-func withLock(fn func()) {
+func withLock(fn func() error) error {
 	if err := os.MkdirAll(config.Dir(), 0o755); err != nil {
-		fn()
-		return
+		return fn()
 	}
 	lockFile, err := os.OpenFile(lockPath(), os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
-		fn()
-		return
+		return fn()
 	}
 	defer lockFile.Close()
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		fn()
-		return
+		return fn()
 	}
 	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
-	fn()
+	return fn()
 }
 
 func readAll() jsonx.J {
@@ -74,40 +71,44 @@ func readAll() jsonx.J {
 	return m
 }
 
-func writeAll(state jsonx.J) {
+func writeAll(state jsonx.J) error {
 	p := path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return
+		return err
 	}
 	b, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return
+		return err
 	}
-	_ = os.Rename(tmp, p)
+	return os.Rename(tmp, p)
 }
 
 // Save mirrors queue_state.save: no-op on empty mid/queueID; selectedID ""
-// writes JSON null (Python None).
-func Save(clientMID, queueID, selectedID string) {
+// writes JSON null (Python None). Returns the write error, if any — the
+// success path of every `queue` depends on this: a silent failure here
+// used to mean the bound queue was never recorded and every later
+// queue-show/queue-add/shuffle would answer "no active queue" with no
+// explanation (see the D2 ruling on how the command layer reports this).
+func Save(clientMID, queueID, selectedID string) error {
 	if clientMID == "" || queueID == "" {
-		return
+		return nil
 	}
 	var selected any
 	if selectedID != "" {
 		selected = selectedID
 	}
-	withLock(func() {
+	return withLock(func() error {
 		state := readAll()
 		state[clientMID] = jsonx.J{
 			"playQueueID":    queueID,
 			"selectedItemID": selected,
 			"savedAt":        time.Now().Unix(),
 		}
-		writeAll(state)
+		return writeAll(state)
 	})
 }
 
@@ -115,32 +116,37 @@ func Save(clientMID, queueID, selectedID string) {
 // returns true exactly when it wrote. The bind-failure path uses it to stage a
 // newly created queue without clobbering an existing (bound/possibly playing)
 // one — the returned bool is the single source of truth for the caller's
-// `staged` flag, so the flag and the persisted state can never disagree.
-// Empty mid/queueID is a no-op → false. It is its own read-modify-write (never
-// composed from Save) so C5's per-op lock can wrap it without self-deadlock.
-func SaveIfAbsent(clientMID, queueID, selectedID string) bool {
+// `staged` flag, so the flag and the persisted state can never disagree: it
+// is set only after writeAll itself succeeds, never unconditionally after
+// attempting the write. Empty mid/queueID is a no-op → (false, nil). It is
+// its own read-modify-write (never composed from Save) so C5's per-op lock
+// can wrap it without self-deadlock.
+func SaveIfAbsent(clientMID, queueID, selectedID string) (bool, error) {
 	if clientMID == "" || queueID == "" {
-		return false
+		return false, nil
 	}
 	var selected any
 	if selectedID != "" {
 		selected = selectedID
 	}
 	wrote := false
-	withLock(func() {
+	err := withLock(func() error {
 		state := readAll()
 		if _, ok := state[clientMID]; ok {
-			return
+			return nil
 		}
 		state[clientMID] = jsonx.J{
 			"playQueueID":    queueID,
 			"selectedItemID": selected,
 			"savedAt":        time.Now().Unix(),
 		}
-		writeAll(state)
+		if err := writeAll(state); err != nil {
+			return err
+		}
 		wrote = true
+		return nil
 	})
-	return wrote
+	return wrote, err
 }
 
 // Load mirrors queue_state.load; nil when absent.
@@ -155,15 +161,16 @@ func Load(clientMID string) jsonx.J {
 }
 
 // Clear mirrors queue_state.clear.
-func Clear(clientMID string) {
+func Clear(clientMID string) error {
 	if clientMID == "" {
-		return
+		return nil
 	}
-	withLock(func() {
+	return withLock(func() error {
 		state := readAll()
 		if _, ok := state[clientMID]; ok {
 			delete(state, clientMID)
-			writeAll(state)
+			return writeAll(state)
 		}
+		return nil
 	})
 }

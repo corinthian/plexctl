@@ -70,6 +70,79 @@ func TestQueueSavesQueueState(t *testing.T) {
 	}
 }
 
+// TestQueueBindSuccessReadOnlyConfigDirReportsStateSavedFalse pins W10/D2:
+// a state-write failure after a successful bind must not become
+// output.Fail — playback is already running. The envelope stays ok:true,
+// exit 0, and carries stateSaved:false plus playQueueID.
+func TestQueueBindSuccessReadOnlyConfigDirReportsStateSavedFalse(t *testing.T) {
+	f := newFakePMS(t)
+	f.resolvableClient(t)
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onJSON("POST", "/playQueues", map[string]any{
+		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
+	})
+	f.onStatus("GET", "/player/playback/playMedia", 200)
+
+	if err := os.Chmod(f.dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.dir, 0o700) })
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue", "123"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+	if code != -1 {
+		t.Fatalf("exit = %d, want -1 (ok:true despite the write failure); out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != true {
+		t.Fatalf("ok = %#v, want true; out=%s", got["ok"], out)
+	}
+	if got["stateSaved"] != false {
+		t.Fatalf("stateSaved = %#v, want false; out=%s", got["stateSaved"], out)
+	}
+	if got["playQueueID"] != "555" {
+		t.Fatalf("playQueueID = %#v, want 555; out=%s", got["playQueueID"], out)
+	}
+}
+
+// TestQueueBindFailureStagedNeverTrueWithoutPersistedEntry pins the other
+// half of D2: on the SaveIfAbsent staging path, `staged` must never be
+// true unless the write actually persisted. A dead client (bind failure)
+// plus a read-only config dir means SaveIfAbsent's own write fails too.
+func TestQueueBindFailureStagedNeverTrueWithoutPersistedEntry(t *testing.T) {
+	f := newFakePMS(t)
+	f.resolvableClient(t)
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onJSON("POST", "/playQueues", map[string]any{
+		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
+	})
+	f.onStatus("GET", "/player/playback/playMedia", 404) // bind fails: HTTP error, not transport
+
+	if err := os.Chmod(f.dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.dir, 0o700) })
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue", "123"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (bind failed); out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != false {
+		t.Fatalf("ok = %#v, want false; out=%s", got["ok"], out)
+	}
+	if _, present := got["staged"]; present {
+		t.Fatalf("staged present with no persisted entry (write was blocked): %#v", got)
+	}
+	errStr, _ := got["error"].(string)
+	if !strings.Contains(errStr, "additionally failed to stage queue state") {
+		t.Fatalf("error = %q, want it to mention the staging failure too", errStr)
+	}
+}
+
 // C1 (finding 2): with the target client registered but inactive, `queue`
 // must resolve-and-exit BEFORE creating any playQueue — zero POSTs to
 // /playQueues — so a bind-impossible client never orphans server-side state.

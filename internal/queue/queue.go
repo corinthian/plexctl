@@ -48,10 +48,11 @@ func AnnotateBind(result jsonx.J, queueID, selectedID string) {
 
 // clearClientState drops the persisted (mid -> queueID) entry for the client,
 // used when PMS reports the queue is gone (404).
-func clearClientState(client jsonx.J) {
+func clearClientState(client jsonx.J) error {
 	if mid := client["machineIdentifier"]; jsonx.Truthy(mid) {
-		queuestate.Clear(jsonx.AsStr(mid))
+		return queuestate.Clear(jsonx.AsStr(mid))
 	}
+	return nil
 }
 
 // emptyState is the ok:true "no queue here" shape shared by the resolver-miss
@@ -224,12 +225,16 @@ func Clear(client jsonx.J) jsonx.J {
 		// Clearing an already-pruned queue is idempotent success — still drop
 		// the stale state entry.
 		if apiStatus(derr) == 404 {
-			clearClientState(client)
+			if cerr := clearClientState(client); cerr != nil {
+				return jsonx.J{"ok": false, "error": cerr.Error()}
+			}
 			return jsonx.J{"ok": true}
 		}
 		return jsonx.J{"ok": false, "error": derr.Error()}
 	}
-	clearClientState(client)
+	if cerr := clearClientState(client); cerr != nil {
+		return jsonx.J{"ok": false, "error": cerr.Error()}
+	}
 	return jsonx.J{"ok": true}
 }
 

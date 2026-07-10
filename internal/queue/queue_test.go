@@ -747,6 +747,31 @@ func TestClearRemovesPersistedState(t *testing.T) {
 	}
 }
 
+// TestClearPropagatesStateWriteFailure pins the D2 ruling's Clear clause:
+// unlike queue's own bind-success path, Clear errors DO propagate to
+// queue-clear's error path — there's no "playback already running" reason
+// to soften them the way W10/D2 softens queue's own state-write failure.
+func TestClearPropagatesStateWriteFailure(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "5535", "42687")
+	f.onJSON("DELETE", "/playQueues/5535/items", jsonx.J{"MediaContainer": jsonx.J{}})
+
+	dir := os.Getenv("PLEXCTL_CONFIG_DIR")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	result := Clear(appleTV())
+
+	if result["ok"] != false {
+		t.Fatalf("result = %#v, want ok:false", result)
+	}
+	if _, hasErr := result["error"]; !hasErr {
+		t.Fatalf("result missing error: %#v", result)
+	}
+}
+
 // B4: clearing an already-pruned queue is idempotent success — the DELETE
 // 404s, we drop the stale entry and still report ok:true.
 func TestClear404IsIdempotentSuccessAndClearsState(t *testing.T) {

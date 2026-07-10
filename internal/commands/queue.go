@@ -65,17 +65,36 @@ func newQueueCmd() *cobra.Command {
 			qid := jsonx.AsStr(q["playQueueID"])
 			sel := jsonx.AsStr(q["selectedItemID"])
 			if jsonx.Truthy(result["ok"]) {
-				// Bind succeeded: this IS the live queue, record it unconditionally.
-				queuestate.Save(midStr, qid, sel)
-			} else if queuestate.SaveIfAbsent(midStr, qid, sel) {
+				// Bind succeeded: this IS the live queue, record it
+				// unconditionally. D2 ruling: a failed write here does NOT
+				// become output.Fail -- playback is already running, so
+				// escalating to ok:false would be a worse lie than the one
+				// W10 exists to remove. stateSaved is always present (never
+				// inferred from absence) so a consumer can tell the two
+				// cases apart.
+				if serr := queuestate.Save(midStr, qid, sel); serr != nil {
+					result["stateSaved"] = false
+				} else {
+					result["stateSaved"] = true
+				}
+			} else {
 				// Bind failed and no queue was recorded for this client: stage the
 				// new queue so queue-start can bind it later (finding 1). If an
 				// entry already exists (the bound/playing queue), SaveIfAbsent
-				// preserves it and returns false — no staged key; recovery is
+				// preserves it and returns false -- no staged key; recovery is
 				// re-running `queue` once the device is back. staged derives from
 				// the write itself, never a separate Load, so it can't disagree
-				// with what was persisted.
-				result["staged"] = true
+				// with what was persisted: it is set only when SaveIfAbsent
+				// itself reports a successful write.
+				staged, serr := queuestate.SaveIfAbsent(midStr, qid, sel)
+				if serr != nil {
+					// The bind already failed (ok is already false here); staging
+					// also failing is a second, distinct problem worth surfacing --
+					// playQueueID is already on the envelope via AnnotateBind above.
+					result["error"] = jsonx.AsStr(result["error"]) + "; additionally failed to stage queue state: " + serr.Error()
+				} else if staged {
+					result["staged"] = true
+				}
 			}
 		}
 		output.Out(result)

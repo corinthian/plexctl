@@ -74,6 +74,30 @@ func TestPythonFileFormatCompatible(t *testing.T) {
 	}
 }
 
+// TestWriteFailuresPropagateInsteadOfSilentlyDiscarding pins W10: writeAll
+// used to discard MkdirAll/Marshal/WriteFile/Rename errors entirely. Save,
+// SaveIfAbsent, and Clear now all return the underlying error, and
+// SaveIfAbsent's wrote bool is only ever true when the write itself
+// succeeded (the :117 invariant comment made true, not just aspirational).
+func TestWriteFailuresPropagateInsteadOfSilentlyDiscarding(t *testing.T) {
+	dir := setup(t)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	if err := queuestate.Save("mid-1", "q1", "s1"); err == nil {
+		t.Fatal("Save on a read-only dir returned nil error")
+	}
+	wrote, err := queuestate.SaveIfAbsent("mid-1", "q1", "s1")
+	if err == nil {
+		t.Fatal("SaveIfAbsent on a read-only dir returned nil error")
+	}
+	if wrote {
+		t.Fatal("SaveIfAbsent reported wrote=true despite the write failing")
+	}
+}
+
 func TestEmptyArgsAreNoOps(t *testing.T) {
 	setup(t)
 	queuestate.Save("", "5", "1")
