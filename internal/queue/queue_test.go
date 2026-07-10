@@ -379,6 +379,36 @@ func TestStartHappyPathBindsSavedQueue(t *testing.T) {
 	}
 }
 
+// TestStartNullSelectedItemIDOmitsParamInsteadOfSendingNone pins W7: a
+// Python-era (or otherwise malformed) queue_state.json entry with
+// selectedItemID: null used to reach the Companion bind request as the
+// literal string "None" (jsonx.AsStr(nil)'s display sentinel, never meant
+// to feed a request parameter). It's now omitted from the request entirely.
+func TestStartNullSelectedItemIDOmitsParamInsteadOfSendingNone(t *testing.T) {
+	f := newFakePMS(t)
+	f.serverIDRoute(serverMID)
+	f.onStatus("GET", "/player/playback/playMedia", 200)
+
+	dir := os.Getenv("PLEXCTL_CONFIG_DIR")
+	state := `{"abc": {"playQueueID": "555", "selectedItemID": null, "savedAt": 1762290000}}`
+	if err := os.WriteFile(filepath.Join(dir, "queue_state.json"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := Start(appleTVOn(f.srv.URL))
+
+	if result["ok"] != true {
+		t.Fatalf("result = %#v, want ok:true", result)
+	}
+	q := f.lastQuery("GET", "/player/playback/playMedia")
+	if q.Has("playQueueSelectedItemID") {
+		t.Fatalf("playMedia query carried playQueueSelectedItemID: %v", q)
+	}
+	if got := q.Get("playQueueID"); got != "555" {
+		t.Fatalf("playQueueID = %q, want 555", got)
+	}
+}
+
 func TestStartTransportFailurePreservesStateAndFlagsUnreachable(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "555", "999")

@@ -249,7 +249,10 @@ func Start(client jsonx.J) jsonx.J {
 		return noActiveQueue(client)
 	}
 	queueID := jsonx.AsStr(entry["playQueueID"])
-	selectedItemID := jsonx.AsStr(entry["selectedItemID"])
+	var selectedItemID string
+	if jsonx.Truthy(entry["selectedItemID"]) {
+		selectedItemID = jsonx.AsStr(entry["selectedItemID"])
+	}
 	result := playback.PlayQueue(client, queueID, selectedItemID)
 	AnnotateBind(result, queueID, selectedItemID)
 	return result

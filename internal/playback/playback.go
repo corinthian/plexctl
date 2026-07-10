@@ -438,7 +438,11 @@ func hostPort(serverURL string) (string, int) {
 	return u.Hostname(), port
 }
 
-// PlayQueue mirrors playback.play_queue.
+// PlayQueue mirrors playback.play_queue. selectedItemID is omitted from the
+// request entirely when nil/empty (jsonx.AsStr(nil)'s "None" sentinel is
+// useful for display but must never reach a request parameter — a
+// Python-era queue_state.json with a null selectedItemID can still reach
+// this call via the saved/staged Start path).
 func PlayQueue(client jsonx.J, queueID, selectedItemID string) jsonx.J {
 	serverID := GetServerMachineID()
 	if serverID == "" {
@@ -447,15 +451,18 @@ func PlayQueue(client jsonx.J, queueID, selectedItemID string) jsonx.J {
 	cfg := config.Load()
 	serverURL := config.StringOr(cfg, "server_url", config.Defaults["server_url"])
 	address, port := hostPort(serverURL)
-	return playerCmd(client, "/player/playback/playMedia", map[string]string{
-		"key":                     "/playQueues/" + queueID,
-		"playQueueID":             queueID,
-		"playQueueSelectedItemID": selectedItemID,
-		"machineIdentifier":       serverID,
-		"address":                 address,
-		"port":                    strconv.Itoa(port),
-		"offset":                  "0",
-	})
+	params := map[string]string{
+		"key":               "/playQueues/" + queueID,
+		"playQueueID":       queueID,
+		"machineIdentifier": serverID,
+		"address":           address,
+		"port":              strconv.Itoa(port),
+		"offset":            "0",
+	}
+	if selectedItemID != "" && selectedItemID != "None" {
+		params["playQueueSelectedItemID"] = selectedItemID
+	}
+	return playerCmd(client, "/player/playback/playMedia", params)
 }
 
 // PlayMedia mirrors playback.play_media.
