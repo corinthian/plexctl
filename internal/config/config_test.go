@@ -39,7 +39,7 @@ func TestSaveLoadRoundTripWithEscaping(t *testing.T) {
 }
 
 func TestLoadReadsPythonWriterFormat(t *testing.T) {
-	// Byte-format of plex-voice config.save: bare `k = "v"` lines.
+	// Pinned byte-format: bare `k = "v"` lines.
 	dir := t.TempDir()
 	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
 	py := "server_url = \"http://10.0.0.2:32400\"\ntoken = \"tok\"\ndefault_client = \"Apple TV\"\nclient_id = \"plexctl-deadbeef\"\ntimeout = \"8\"\n"

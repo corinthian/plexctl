@@ -247,8 +247,8 @@ func TestCreateEmptyKeysRejected(t *testing.T) {
 // on a self-referential typo.
 const wantInvalidPlaylistTypeMsg = "playlist_type must be one of ['audio', 'photo', 'video']"
 
-// wantSmartRefusal is copied verbatim from plex-voice/plexctl/playlists.py's
-// _SMART_REFUSAL (not the Go smartRefusal constant under test).
+// wantSmartRefusal pins the exact smart-refusal wording independently of the
+// Go smartRefusal constant under test.
 const wantSmartRefusal = "smart playlist: contents are query-driven and cannot be edited via " +
 	"the API — edit the smart filter in the Plex app instead"
 

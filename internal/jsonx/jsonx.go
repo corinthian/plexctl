@@ -1,5 +1,5 @@
 // Package jsonx mirrors Python-dict semantics for the port: PMS JSON is
-// handled as map[string]any end-to-end, matching plex-voice's dict handling
+// handled as map[string]any end-to-end, with Python-dict-like semantics
 // so projections stay mechanical line-for-line.
 package jsonx
 

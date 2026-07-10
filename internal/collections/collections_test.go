@@ -600,9 +600,9 @@ func TestRemoveItemUsesDelete(t *testing.T) {
 
 // --- smart-collection refusal ------------------------------------------------
 
-// wantSmartRefusal is copied verbatim from plex-voice/plexctl/collections.py's
-// _SMART_REFUSAL (not the Go smartRefusal constant under test) so the
-// assertion can't pass on a self-referential typo.
+// wantSmartRefusal pins the exact smart-refusal wording independently of the
+// Go smartRefusal constant under test, so the assertion can't pass on a
+// self-referential typo.
 const wantSmartRefusal = "smart collection: contents are query-driven and cannot be edited via " +
 	"the API — edit the smart filter in the Plex app instead"
 
