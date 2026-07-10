@@ -54,11 +54,14 @@ func newHistoryCmd() *cobra.Command {
 		Short: "Show recent watch history.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if limit < 1 {
+				return fmt.Errorf("invalid value for '--limit': '%d' is not greater than 0", limit)
+			}
 			output.Out(sessions.History(limit))
 			return nil
 		},
 	}
-	cmd.Flags().IntVarP(&limit, "limit", "n", 10, "Number of entries to return")
+	cmd.Flags().IntVarP(&limit, "limit", "n", 10, "Number of entries to return (must be >= 1)")
 	return cmd
 }
 
