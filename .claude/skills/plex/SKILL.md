@@ -251,6 +251,7 @@ Looping a command over many shows (e.g. auditing audio across the whole library)
 
 - Enumerate shows once via `library list`, then loop `audit-audio "<show>"` (or better, by ratingKey-resolved title). Never loop per-episode `metadata` — `audit-audio` already returns every episode.
 - Every call has a built-in 10s HTTP timeout — a stalled call errors out, it does not hang. Exit code 2 means "timed out": retry just those items once, then report them as skipped. No external watchdog, no `pkill` — plexctl runs one process per call and leaves nothing behind.
+- Exit code 64 means a malformed invocation — bad flag, bad argument, empty required value. Never retry it; fix the command instead. The JSON envelope on stdout says what was wrong.
 - Write intermediate results to the session scratchpad directory, not ad-hoc paths.
 - For kill-safe partial progress on big sweeps, use `--ndjson` (on `episodes` and `audit-audio`): one JSON line per episode as produced, then a summary line — a killed run keeps everything already printed.
 
@@ -848,7 +849,7 @@ Append a line to `~/.claude/skills/plex/INCIDENTS.md` (create it on first use) w
 
 | Trigger | Note |
 |---|---|
-| `stateSaved: false` in any envelope | This field ships with the v1.0.0 binary and is dormant until that deploy — still worth logging so the data exists once it's live |
+| `stateSaved: false` in any envelope | Live as of the v1.0.0 binary deploy (2026-07-10) — means the state write failed |
 | A request timeout during queue creation, bind, or `queue-start` | |
 | `clientUnreachable: true` | |
 | A "no active queue" answer that contradicts a queue created moments earlier | |
