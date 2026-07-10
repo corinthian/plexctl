@@ -23,8 +23,11 @@ import (
 	"github.com/corinthian/plexctl/internal/output"
 )
 
-// Version is the X-Plex-Version header value and the CLI version.
-const Version = "0.9.0"
+// Version is the X-Plex-Version header value and the CLI version. It's a
+// var, not a const, so build.sh can inject the real value via
+// -ldflags -X — a const can't be overridden that way. This default is
+// what an unadorned `go build` (dev builds, tests) reports.
+var Version = "1.0.0"
 
 const plexTV = "https://plex.tv"
 
