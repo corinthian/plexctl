@@ -325,7 +325,11 @@ func AddToClient(client jsonx.J, ratingKeys []string) jsonx.J {
 			return result
 		}
 		expected++
-		actual := int(jsonx.Num(jsonx.GetMap(api.Get("/playQueues/"+qid, nil), "MediaContainer")["size"]))
+		verifyData, verr := api.TryGet("/playQueues/"+qid, nil)
+		if verr != nil {
+			return jsonx.J{"ok": false, "error": verr.Error(), "added": added, "playQueueID": qid}
+		}
+		actual := int(jsonx.Num(jsonx.GetMap(verifyData, "MediaContainer")["size"]))
 		if actual != expected {
 			return jsonx.J{
 				"ok":          false,

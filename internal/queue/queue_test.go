@@ -8,9 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/queuestate"
 	"github.com/corinthian/plexctl/internal/testutil"
@@ -807,6 +810,52 @@ func TestAddToClientSingleKeyAppendsOnce(t *testing.T) {
 	puts := f.queriesFor("PUT", "/playQueues/5582")
 	if len(puts) != 1 || puts[0].Get("uri") == "" {
 		t.Fatalf("PUT calls = %#v", puts)
+	}
+}
+
+// TestAddToClientVerifyGETTimeoutReturnsAddedInsteadOfExiting pins W6: the
+// verify-GET after each PUT used to be print-and-exit api.Get, which would
+// kill the process on a mid-loop timeout and lose the already-tracked
+// `added` count. It's now api.TryGet, so a timeout surfaces as an
+// ok:false envelope carrying `added` and `playQueueID` instead.
+func TestAddToClientVerifyGETTimeoutReturnsAddedInsteadOfExiting(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "5582", "1")
+	f.serverIDRoute(serverMID)
+	f.onJSON("PUT", "/playQueues/5582", jsonx.J{"MediaContainer": jsonx.J{"playQueueID": "5582"}})
+
+	var calls int
+	var mu sync.Mutex
+	f.on("GET", "/playQueues/5582", func(r *http.Request) (int, any) {
+		mu.Lock()
+		n := calls
+		calls++
+		mu.Unlock()
+		if n == 0 {
+			// initial size check, before the loop's first PUT
+			return 200, sizeResp(4)
+		}
+		// first per-key verify-GET hangs past the timeout
+		time.Sleep(250 * time.Millisecond)
+		return 200, nil
+	})
+	api.SetTimeoutOverride(0.05)
+	t.Cleanup(api.ClearTimeoutOverride)
+
+	result := AddToClient(appleTV(), []string{"100", "101"})
+
+	if result["ok"] != false {
+		t.Fatalf("result = %#v, want ok:false", result)
+	}
+	if result["added"] != 0 {
+		t.Fatalf("added = %#v, want 0 (verify-GET failed before the first key could be confirmed)", result["added"])
+	}
+	if result["playQueueID"] != "5582" {
+		t.Fatalf("playQueueID = %#v, want 5582", result["playQueueID"])
+	}
+	errStr, _ := result["error"].(string)
+	if !strings.HasPrefix(errStr, "request timed out") {
+		t.Fatalf("error = %q, want a \"request timed out\" prefix", errStr)
 	}
 }
 
