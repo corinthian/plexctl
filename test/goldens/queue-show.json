@@ -1,0 +1,23 @@
+{
+  "items": [
+    {
+      "duration": 6698208,
+      "playQueueItemID": 45136,
+      "selected": true,
+      "title": "The Birds",
+      "type": "movie",
+      "year": 2017
+    },
+    {
+      "duration": 5689824,
+      "playQueueItemID": 45137,
+      "selected": false,
+      "title": "Casablanca",
+      "type": "movie",
+      "year": 1998
+    }
+  ],
+  "ok": true,
+  "playQueueID": "5732",
+  "selectedItemID": 45136
+}

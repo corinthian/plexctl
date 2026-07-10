@@ -1,0 +1,50 @@
+{
+  "ok": true,
+  "history": [
+    {
+      "title": "Casablanca",
+      "type": "movie",
+      "show": null,
+      "viewedAt": 1700000000,
+      "ratingKey": "50001",
+      "year": 1942,
+      "duration": 6120000
+    },
+    {
+      "title": "Rocky",
+      "type": "movie",
+      "show": null,
+      "viewedAt": 1700086400,
+      "ratingKey": "50002",
+      "year": 1976,
+      "duration": 6900000
+    },
+    {
+      "title": "Psycho",
+      "type": "movie",
+      "show": null,
+      "viewedAt": 1700172800,
+      "ratingKey": "50003",
+      "year": 1960,
+      "duration": 6660000
+    },
+    {
+      "title": "Vertigo",
+      "type": "movie",
+      "show": null,
+      "viewedAt": 1700259200,
+      "ratingKey": "50004",
+      "year": 1958,
+      "duration": 7620000
+    },
+    {
+      "title": "Alien",
+      "type": "movie",
+      "show": null,
+      "viewedAt": 1700345600,
+      "ratingKey": "50005",
+      "year": 1979,
+      "duration": 6540000
+    }
+  ]
+}
