@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/commands"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
@@ -51,5 +52,37 @@ func TestExecuteHelpAndVersionExitZero(t *testing.T) {
 		if code != -1 {
 			t.Fatalf("%v: exit code = %d, want -1 (no output.Exit call); out=%s", args, code, out)
 		}
+	}
+}
+
+// TestTimeoutFlagNonPositiveExitsUsage pins W1: --timeout 0 used to hang
+// forever (http.Client.Timeout of 0 is Go for no timeout). It's now
+// rejected at the CLI boundary as a usage error before any request is
+// attempted — PersistentPreRunE returns before now-playing's RunE ever
+// runs, so this needs no fake PMS.
+func TestTimeoutFlagNonPositiveExitsUsage(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	t.Cleanup(func() { api.ClearTimeoutOverride() })
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"zero", []string{"plexctl", "--timeout=0", "now-playing"}},
+		{"negative", []string{"plexctl", "--timeout=-1", "now-playing"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			os.Args = c.args
+			out, code := testutil.Capture(t, commands.Execute)
+			if code != 64 {
+				t.Fatalf("exit code = %d, want 64; out=%s", code, out)
+			}
+			got := mustUnmarshal(t, out)
+			if got["ok"] != false {
+				t.Fatalf("got %#v", got)
+			}
+		})
 	}
 }

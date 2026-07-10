@@ -192,3 +192,41 @@ func TestDefaultTimeoutResolution(t *testing.T) {
 		t.Fatalf("override should win, got %v", got)
 	}
 }
+
+// TestDefaultTimeoutClampsNonPositive pins W1: a non-positive or
+// unparseable value from any source is never returned as-is — it would
+// make http.Client.Timeout 0, which is Go for no timeout at all — so it
+// falls through exactly like an absent/unparseable source would.
+func TestDefaultTimeoutClampsNonPositive(t *testing.T) {
+	testutil.Setup(t, "http://unused")
+
+	t.Run("env zero falls through to default", func(t *testing.T) {
+		t.Setenv("PLEXCTL_TIMEOUT", "0")
+		if got := api.DefaultTimeout(); got != api.DefaultTimeoutSeconds {
+			t.Fatalf("PLEXCTL_TIMEOUT=0 resolved to %v, want %v", got, api.DefaultTimeoutSeconds)
+		}
+	})
+
+	t.Run("env unparseable falls through to default", func(t *testing.T) {
+		t.Setenv("PLEXCTL_TIMEOUT", "abc")
+		if got := api.DefaultTimeout(); got != api.DefaultTimeoutSeconds {
+			t.Fatalf("PLEXCTL_TIMEOUT=abc resolved to %v, want %v", got, api.DefaultTimeoutSeconds)
+		}
+	})
+
+	t.Run("override zero falls through to default (defensive resolver clamp)", func(t *testing.T) {
+		api.SetTimeoutOverride(0)
+		t.Cleanup(func() { api.ClearTimeoutOverride() })
+		if got := api.DefaultTimeout(); got != api.DefaultTimeoutSeconds {
+			t.Fatalf("override=0 resolved to %v, want %v", got, api.DefaultTimeoutSeconds)
+		}
+	})
+
+	t.Run("override negative falls through to default", func(t *testing.T) {
+		api.SetTimeoutOverride(-1)
+		t.Cleanup(func() { api.ClearTimeoutOverride() })
+		if got := api.DefaultTimeout(); got != api.DefaultTimeoutSeconds {
+			t.Fatalf("override=-1 resolved to %v, want %v", got, api.DefaultTimeoutSeconds)
+		}
+	})
+}

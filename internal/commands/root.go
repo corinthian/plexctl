@@ -4,6 +4,8 @@
 package commands
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 
 	"github.com/corinthian/plexctl/internal/api"
@@ -34,10 +36,17 @@ failure, 2 when the failure was a request timeout, 64 on a usage or
 validation error (malformed invocation — never retry, fix the command).`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Root().PersistentFlags().Changed("timeout") {
+				// A non-positive override is not "no timeout" — it makes
+				// http.Client.Timeout 0, which is Go for no timeout at all.
+				// Reject at the boundary rather than let it reach DefaultTimeout.
+				if timeoutFlag <= 0 {
+					return fmt.Errorf("invalid value for '--timeout': %v is not greater than 0", timeoutFlag)
+				}
 				api.SetTimeoutOverride(timeoutFlag)
 			}
+			return nil
 		},
 	}
 	root.PersistentFlags().Float64Var(&timeoutFlag, "timeout", 0,

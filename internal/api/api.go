@@ -47,23 +47,38 @@ func ClearTimeoutOverride() {
 
 // DefaultTimeout resolves the per-request timeout:
 // --timeout > $PLEXCTL_TIMEOUT > config `timeout` > 10s.
+//
+// A resolved value <= 0 is never returned — http.Client.Timeout of 0 means
+// no timeout at all, so a non-positive value from any source is treated the
+// same as that source being absent or unparseable. The CLI's --timeout flag
+// is validated at the boundary (root.go) so timeoutOverride should never
+// carry a non-positive value in practice; the check here is the second,
+// unconditional layer for that invariant and for any other caller of
+// SetTimeoutOverride.
 func DefaultTimeout() float64 {
 	if timeoutOverride != nil {
-		return *timeoutOverride
+		if *timeoutOverride > 0 {
+			return *timeoutOverride
+		}
+		return DefaultTimeoutSeconds
 	}
 	if raw := os.Getenv("PLEXCTL_TIMEOUT"); raw != "" {
-		if f, err := strconv.ParseFloat(raw, 64); err == nil {
+		if f, err := strconv.ParseFloat(raw, 64); err == nil && f > 0 {
 			return f
 		}
 	}
 	if raw, ok := config.Load()["timeout"]; ok && jsonx.Truthy(raw) {
 		switch t := raw.(type) {
 		case float64:
-			return t
+			if t > 0 {
+				return t
+			}
 		case int64:
-			return float64(t)
+			if t > 0 {
+				return float64(t)
+			}
 		case string:
-			if f, err := strconv.ParseFloat(t, 64); err == nil {
+			if f, err := strconv.ParseFloat(t, 64); err == nil && f > 0 {
 				return f
 			}
 		}
