@@ -5,6 +5,7 @@ package clients
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/corinthian/plexctl/internal/api"
@@ -110,7 +111,7 @@ func mergeClients(active []jsonx.J, registered []jsonx.J) []jsonx.J {
 		}
 		if ac != nil {
 			row["machineIdentifier"] = ac["machineIdentifier"]
-			row["baseurl"] = "http://" + jsonx.AsStr(ac["host"]) + ":" + jsonx.AsStr(ac["port"])
+			row["baseurl"] = "http://" + net.JoinHostPort(jsonx.AsStr(ac["host"]), jsonx.AsStr(ac["port"]))
 		}
 		if ok {
 			row["ambiguous"] = duplicateNames[k]

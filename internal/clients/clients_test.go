@@ -90,6 +90,23 @@ func TestMergeClientsAmbiguousDuplicates(t *testing.T) {
 	}
 }
 
+// TestMergeClientsIPv6HostBracketsBaseurl pins W9: naked "http://"+host+":"+
+// port concatenation produced an invalid URL for an IPv6 host (the colons
+// in the address collide with the port separator). net.JoinHostPort brackets
+// the host correctly.
+func TestMergeClientsIPv6HostBracketsBaseurl(t *testing.T) {
+	active := []jsonx.J{activeEntry("Apple TV", "mid-1", "fe80::1", 32500)}
+	registered := []jsonx.J{registeredEntry("Apple TV")}
+
+	out := mergeClients(active, registered)
+	if len(out) != 1 {
+		t.Fatalf("want 1 row, got %d: %#v", len(out), out)
+	}
+	if out[0]["baseurl"] != "http://[fe80::1]:32500" {
+		t.Fatalf("baseurl = %#v, want http://[fe80::1]:32500", out[0]["baseurl"])
+	}
+}
+
 func TestMergeClientsInactiveRegisteredDevice(t *testing.T) {
 	active := []jsonx.J{activeEntry("Apple TV", "mid-1", "h", 1)}
 	registered := []jsonx.J{registeredEntry("Safari")}
