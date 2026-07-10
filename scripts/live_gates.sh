@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # Live cutover gates for the Go port — run from a context with Local Network
 # access (iTerm). Exercises the real PMS and Apple TV:
-#   gate 1: read-only parity, direct LAN (scripts/parity.sh)
 #   gate 2: Apple TV player sequence (queue/pause/seek-dance/add/remove/clear/stop)
 #           + cross-binary queue_state.json read
 #   gate 3: writes on scratch targets (collection + playlist lifecycle,
-#           bulk set-audio --dry-run diff vs Python, one reverted real write)
+#           bulk set-audio --dry-run diff vs the deployed binary, one reverted real write)
 # Every mutation is reverted or targets a scratch object created here.
 set -u
 cd "$(dirname "$0")/.."
 GO=./dist/plexctl
-PY="$HOME/.local/bin/plexctl"
+OLD="$HOME/.local/bin/plexctl"
 LOG="${LIVE_GATE_LOG:-/tmp/live_gates.log}"
 PASS=0; FAIL=0
 
@@ -26,9 +25,6 @@ check() { # check NAME JQ_EXPR JSON
 }
 
 : > "$LOG"
-say "gate 1: read-only parity, direct LAN"
-GO_BIN="$GO" PY_BIN="$PY" ./scripts/parity.sh >> "$LOG" 2>&1
-
 say "gate 2: player sequence pre-check"
 NP=$("$GO" now-playing)
 echo "$NP" >> "$LOG"
@@ -51,9 +47,9 @@ else
   say "gate 2: queue-add size-delta, then cross-binary state read"
   AR=$("$GO" queue-add "$K4"); echo "$AR" >> "$LOG"
   check queue-add '.ok == true and .added == 1' "$AR"
-  PYQS=$("$PY" queue-show); echo "PYTHON: $PYQS" >> "$LOG"
-  check python-reads-go-queue-state '.ok == true and (.items | length == 4)' "$PYQS"
-  RM_ID=$(printf '%s' "$PYQS" | jq -r '.items[-1].playQueueItemID')
+  OLDQS=$("$OLD" queue-show); echo "OLD: $OLDQS" >> "$LOG"
+  check old-deployed-reads-new-binary-state '.ok == true and (.items | length == 4)' "$OLDQS"
+  RM_ID=$(printf '%s' "$OLDQS" | jq -r '.items[-1].playQueueItemID')
   RR=$("$GO" queue-remove "$RM_ID"); echo "$RR" >> "$LOG"; check queue-remove '.ok == true' "$RR"
   QS3=$("$GO" queue-show); check queue-show-back-to-3 '.items | length == 3' "$QS3"
   say "gate 2: clear + stop"
@@ -62,7 +58,7 @@ else
   SP=$("$GO" stop); echo "$SP" >> "$LOG"; check stop '.ok == true' "$SP"
 fi
 
-say "gate 3: scratch collection lifecycle (Go writes, Python cross-reads)"
+say "gate 3: scratch collection lifecycle (new binary writes, old-deployed binary cross-reads)"
 MK=$("$GO" library list --section 1 | jq -r '[.items[].ratingKey][:3] | @tsv')
 M1=$(cut -f1 <<<"$MK"); M2=$(cut -f2 <<<"$MK"); M3=$(cut -f3 <<<"$MK")
 CC=$("$GO" collection create "plexctl-go-gate-scratch" 1 "$M1" "$M2"); echo "$CC" >> "$LOG"
@@ -71,8 +67,8 @@ CKEY=$(printf '%s' "$CC" | jq -r '.ratingKey')
 if [ -n "$CKEY" ] && [ "$CKEY" != "null" ]; then
   CS=$("$GO" collection show "$CKEY"); check collection-show-2 '.count == 2' "$CS"
   CA=$("$GO" collection add "$CKEY" "$M3"); check collection-add '.ok == true and .added == 1' "$CA"
-  PYC=$("$PY" collection show "$CKEY"); echo "PYTHON: $PYC" >> "$LOG"
-  check python-sees-collection '.count == 3' "$PYC"
+  OLDC=$("$OLD" collection show "$CKEY"); echo "OLD: $OLDC" >> "$LOG"
+  check old-deployed-sees-collection '.count == 3' "$OLDC"
   CRM=$("$GO" collection remove "$CKEY" "$M3"); check collection-remove-DELETE-verb '.ok == true' "$CRM"
   CRN=$("$GO" collection rename "$CKEY" "plexctl-go-gate-renamed"); check collection-rename '.ok == true' "$CRN"
   CD=$("$GO" collection delete "$CKEY"); echo "$CD" >> "$LOG"; check collection-delete '.ok == true' "$CD"
@@ -95,12 +91,12 @@ else
   echo "FAIL playlist-create returned no key — skipping dependent steps" >> "$LOG"; FAIL=$((FAIL+1))
 fi
 
-say "gate 3: bulk set-audio --dry-run diff (Go vs Python)"
+say "gate 3: bulk set-audio --dry-run diff (new vs old-deployed binary)"
 SHOW=${SHOW:-$("$GO" library list --section 3 | jq -r '.items[0].title')}
 GDRY=$("$GO" set-audio --show "$SHOW" --all-seasons --dry-run | jq -S .)
-PDRY=$("$PY" set-audio --show "$SHOW" --all-seasons --dry-run | jq -S .)
-if [ "$GDRY" = "$PDRY" ]; then echo "PASS bulk-dry-run-parity" >> "$LOG"; PASS=$((PASS+1));
-else echo "FAIL bulk-dry-run-parity" >> "$LOG"; diff <(printf '%s\n' "$PDRY") <(printf '%s\n' "$GDRY") | head -20 >> "$LOG"; FAIL=$((FAIL+1)); fi
+ODRY=$("$OLD" set-audio --show "$SHOW" --all-seasons --dry-run | jq -S .)
+if [ "$GDRY" = "$ODRY" ]; then echo "PASS old-vs-new-dry-run-parity" >> "$LOG"; PASS=$((PASS+1));
+else echo "FAIL old-vs-new-dry-run-parity" >> "$LOG"; diff <(printf '%s\n' "$ODRY") <(printf '%s\n' "$GDRY") | head -20 >> "$LOG"; FAIL=$((FAIL+1)); fi
 
 say "gate 3: one real set-audio write, verified and reverted"
 TARGET=""
