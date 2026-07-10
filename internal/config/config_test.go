@@ -38,6 +38,24 @@ func TestSaveLoadRoundTripWithEscaping(t *testing.T) {
 	}
 }
 
+// TestSaveWritesViaTempRenameNoLeftoverTmp pins W12: Save now writes through
+// a temp file and renames it into place, like every other writer in this
+// codebase, instead of writing config.toml in place while every command
+// reads it unlocked.
+func TestSaveWritesViaTempRenameNoLeftoverTmp(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+	if err := config.Save([]config.KV{{K: "token", V: "tok"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(config.Path() + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("leftover .tmp file after Save: err=%v", err)
+	}
+	if _, err := os.Stat(config.Path()); err != nil {
+		t.Fatalf("config.toml missing after Save: %v", err)
+	}
+}
+
 func TestLoadReadsPythonWriterFormat(t *testing.T) {
 	// Pinned byte-format: bare `k = "v"` lines.
 	dir := t.TempDir()

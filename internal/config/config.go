@@ -99,7 +99,10 @@ type KV struct {
 }
 
 // Save writes key = "value" lines with the same escaping as config.save
-// (backslashes and double quotes), then forces mode 0600.
+// (backslashes and double quotes), via temp+rename like every other writer
+// in this codebase (queuestate.writeAll, the commandID counter) — config.toml
+// is read unlocked by every command, so a direct in-place write left a
+// window where a concurrent Load could see a truncated or partial file.
 func Save(pairs []KV) error {
 	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		return err
@@ -110,10 +113,14 @@ func Save(pairs []KV) error {
 		esc = strings.ReplaceAll(esc, `"`, `\"`)
 		b.WriteString(p.K + ` = "` + esc + `"` + "\n")
 	}
-	if err := os.WriteFile(Path(), []byte(b.String()), 0o600); err != nil {
+	tmp := Path() + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
 		return err
 	}
-	// WriteFile's perm only applies on create; chmod matches Python's
-	// unconditional chmod(0o600) for pre-existing files.
+	if err := os.Rename(tmp, Path()); err != nil {
+		return err
+	}
+	// WriteFile's perm is subject to umask; chmod forces 0600 regardless,
+	// matching Python's unconditional chmod(0o600).
 	return os.Chmod(Path(), 0o600)
 }
