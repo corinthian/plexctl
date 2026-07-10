@@ -273,7 +273,11 @@ func RemoveItem(client jsonx.J, itemID string) jsonx.J {
 	return jsonx.J{"ok": true}
 }
 
-// Add mirrors queue.add (single PUT append to a known queue id).
+// Add mirrors queue.add (single PUT append to a known queue id). Uses
+// api.TryPut, not print-and-exit api.Put: a mid-loop transport or HTTP
+// failure must return ok:false so Create's rollback (below) and
+// AddToClient's per-key error reporting are both reachable on a real
+// failure, not just the "HTTP 200 but no playQueueID" shape.
 func Add(queueID, ratingKey string) jsonx.J {
 	serverID := playback.GetServerMachineID()
 	if serverID == "" {
@@ -283,7 +287,10 @@ func Add(queueID, ratingKey string) jsonx.J {
 	uri := fmt.Sprintf("server://%s/com.plexapp.plugins.library/library/metadata/%s", serverID, ratingKey)
 	params := url.Values{}
 	params.Set("uri", uri)
-	data := api.Put("/playQueues/"+queueID, params)
+	data, err := api.TryPut("/playQueues/"+queueID, params)
+	if err != nil {
+		return jsonx.J{"ok": false, "error": err.Error()}
+	}
 	mc := jsonx.GetMap(data, "MediaContainer")
 	if jsonx.Truthy(mc["playQueueID"]) {
 		return jsonx.J{"ok": true}

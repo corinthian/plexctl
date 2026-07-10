@@ -337,6 +337,40 @@ func TestCreateMultiKeyMidLoopFailureRollsBack(t *testing.T) {
 	}
 }
 
+// TestCreateMultiKeyTransportFailureRollsBack pins W11: before it, Add's
+// PUT was print-and-exit api.Put, so a mid-loop timeout, refusal, or
+// 4xx/5xx killed the process inside Add — rollback never ran and the
+// queue created by the POST was orphaned on the PMS. This was the
+// unreachable failure shape; TestCreateMultiKeyMidLoopFailureRollsBack
+// above covers the one shape that was always reachable ("HTTP 200 but no
+// playQueueID").
+func TestCreateMultiKeyTransportFailureRollsBack(t *testing.T) {
+	f := newFakePMS(t)
+	f.serverIDRoute(serverMID)
+	f.onJSON("POST", "/playQueues", jsonx.J{"MediaContainer": jsonx.J{"playQueueID": "999", "playQueueSelectedItemID": "42"}})
+	f.onStatus("PUT", "/playQueues/999", 500) // every Add() PUT fails as an HTTP error
+	f.onStatus("DELETE", "/playQueues/999", 500)
+
+	result := Create([]string{"100", "101"}, false, false)
+
+	if result["ok"] != false {
+		t.Fatalf("result = %#v", result)
+	}
+	errStr, _ := result["error"].(string)
+	if !strings.Contains(errStr, "500") {
+		t.Fatalf("error = %q, want it to carry the HTTP 500", errStr)
+	}
+	if result["partialQueueID"] != "999" {
+		t.Fatalf("partialQueueID = %#v, want 999", result["partialQueueID"])
+	}
+	if result["rollbackAttempted"] != true {
+		t.Fatalf("rollbackAttempted = %#v, want true", result["rollbackAttempted"])
+	}
+	if got := f.callCount("DELETE", "/playQueues/999"); got != 1 {
+		t.Fatalf("rollback DELETE calls = %d, want 1", got)
+	}
+}
+
 // --- Start (queue-start, B3) --------------------------------------------------
 
 // appleTVOn is appleTV() with its Companion baseurl pointed at a live test
@@ -846,6 +880,34 @@ func TestAddToClient404KeepsStateAndReturnsNoActiveQueue(t *testing.T) {
 	}
 	if queuestate.Load("abc") == nil {
 		t.Fatalf("state must be KEPT on 404 (finding 7) — a transient 404 must not delete an addressable queue")
+	}
+}
+
+// TestAddToClientPUTTransportFailureReturnsAddedInsteadOfExiting pins
+// W11's effect on AddToClient (which shares Add() with Create): the PUT
+// itself now goes through api.TryPut, so an HTTP error on the add is
+// reported instead of killing the process.
+func TestAddToClientPUTTransportFailureReturnsAddedInsteadOfExiting(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "5582", "1")
+	f.serverIDRoute(serverMID)
+	f.onSequence("GET", "/playQueues/5582", sizeResp(4))
+	f.onStatus("PUT", "/playQueues/5582", 500)
+
+	result := AddToClient(appleTV(), []string{"100"})
+
+	if result["ok"] != false {
+		t.Fatalf("result = %#v, want ok:false", result)
+	}
+	if result["added"] != 0 {
+		t.Fatalf("added = %#v, want 0", result["added"])
+	}
+	if result["playQueueID"] != "5582" {
+		t.Fatalf("playQueueID = %#v, want 5582", result["playQueueID"])
+	}
+	errStr, _ := result["error"].(string)
+	if !strings.Contains(errStr, "500") {
+		t.Fatalf("error = %q, want it to carry the HTTP 500", errStr)
 	}
 }
 

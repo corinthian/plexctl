@@ -491,17 +491,18 @@ func TestCreateMultipleKeysAddsRemainingViaPut(t *testing.T) {
 	}
 }
 
+// TestCreateRollsBackOnPartialAddFailure pins W11: the mid-loop add now
+// goes through api.TryPut, so a real HTTP failure on the second item's PUT
+// — not a monkeypatched addItemsFn — reaches the ok:false branch and
+// triggers rollback. Before W11 this was reachable only via the
+// now-removed test-only seam: api.Put print-and-exits, so this exact
+// failure used to kill the test process instead of returning ok:false.
 func TestCreateRollsBackOnPartialAddFailure(t *testing.T) {
 	f := newFakePMS(t)
 	routeServerAndSections(f, fakeSections...)
 	f.onJSON("/library/collections", mc(jsonx.J{"ratingKey": "777", "title": "Comfort"}))
+	f.onStatus("/library/collections/777/items", 500)
 	f.onJSON("/library/metadata/777", jsonx.J{}) // TryDelete target
-
-	orig := addItemsFn
-	addItemsFn = func(key string, keys []string, serverID string, trustManual bool) jsonx.J {
-		return jsonx.J{"ok": false, "error": "boom"}
-	}
-	defer func() { addItemsFn = orig }()
 
 	result := Create("Comfort", "1", []string{"100", "101"})
 	if result["ok"] != false {
@@ -509,6 +510,30 @@ func TestCreateRollsBackOnPartialAddFailure(t *testing.T) {
 	}
 	if result["partialCollectionID"] != "777" {
 		t.Fatalf("partialCollectionID = %#v, want 777", result["partialCollectionID"])
+	}
+	if result["rollbackAttempted"] != true {
+		t.Fatalf("rollbackAttempted = %#v, want true", result["rollbackAttempted"])
+	}
+	if f.methodCallCount("DELETE", "/library/metadata/777") != 1 {
+		t.Fatal("rollback must DELETE /library/metadata/777 exactly once")
+	}
+}
+
+// TestCreateRollsBackOnTransportFailure covers the failure mode the D2
+// spec called out specifically: a timeout/connection failure mid-loop,
+// not just an HTTP error status.
+func TestCreateRollsBackOnTransportFailure(t *testing.T) {
+	f := newFakePMS(t)
+	routeServerAndSections(f, fakeSections...)
+	f.onJSON("/library/collections", mc(jsonx.J{"ratingKey": "777", "title": "Comfort"}))
+	f.on("/library/collections/777/items", func(r *http.Request) (int, any) {
+		panic(http.ErrAbortHandler) // aborts the connection: classifies as a transport error
+	})
+	f.onJSON("/library/metadata/777", jsonx.J{}) // TryDelete target
+
+	result := Create("Comfort", "1", []string{"100", "101"})
+	if result["ok"] != false {
+		t.Fatalf("ok = %#v, want false", result["ok"])
 	}
 	if result["rollbackAttempted"] != true {
 		t.Fatalf("rollbackAttempted = %#v, want true", result["rollbackAttempted"])

@@ -139,7 +139,7 @@ func Create(title, playlistType string, ratingKeys []string) jsonx.J {
 	key := jsonx.AsStr(playlistKey)
 
 	for _, rk := range ratingKeys[1:] {
-		r := addItemsFn(key, []string{rk}, serverID, true)
+		r := addItemsInternal(key, []string{rk}, serverID, true)
 		if !jsonx.Truthy(r["ok"]) {
 			_, _ = api.TryDelete(fmt.Sprintf("/playlists/%s", key), nil)
 			r["partialPlaylistID"] = key
@@ -167,14 +167,11 @@ func Rename(playlistKey, newTitle string) jsonx.J {
 	return jsonx.J{"ok": true}
 }
 
-// addItemsFn is a seam so Create's mid-loop rollback path can be exercised
-// without a real HTTP failure: with trustManual=true, a resolved serverID,
-// and a single-key slice, addItemsInternal has no real failure path (api.Put
-// print-and-exits rather than returning ok:false), mirroring the Python test
-// suite's monkeypatch of add_items itself. Production always calls through
-// addItemsInternal unchanged.
-var addItemsFn = addItemsInternal
-
+// addItemsInternal mirrors playlists.add_items. Per-item api.TryPut (not
+// print-and-exit api.Put) so a transport or HTTP failure mid-loop returns
+// ok:false with the count added so far, instead of killing the process —
+// this is what makes Create's mid-loop rollback below reachable on a real
+// failure, not just a monkeypatched one.
 func addItemsInternal(playlistKey string, ratingKeys []string, serverID string, trustManual bool) jsonx.J {
 	if len(ratingKeys) == 0 {
 		return jsonx.J{"ok": false, "error": "add requires at least one ratingKey"}
@@ -189,10 +186,14 @@ func addItemsInternal(playlistKey string, ratingKeys []string, serverID string, 
 	if sid == "" {
 		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
 	}
+	added := 0
 	for _, rk := range ratingKeys {
-		api.Put(fmt.Sprintf("/playlists/%s/items", playlistKey), url.Values{"uri": {uriFor(sid, rk)}})
+		if _, err := api.TryPut(fmt.Sprintf("/playlists/%s/items", playlistKey), url.Values{"uri": {uriFor(sid, rk)}}); err != nil {
+			return jsonx.J{"ok": false, "error": err.Error(), "added": added}
+		}
+		added++
 	}
-	return jsonx.J{"ok": true, "added": len(ratingKeys)}
+	return jsonx.J{"ok": true, "added": added}
 }
 
 // AddItems mirrors playlists.add_items (public entry point: no server-id
