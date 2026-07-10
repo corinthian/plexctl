@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/clients"
 	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/playback"
@@ -100,18 +101,29 @@ func newPrevCmd() *cobra.Command {
 // ignore_unknown_options + allow_extra_args and takes POSITION as
 // nargs=-1/UNPROCESSED so tokens like "-30s" survive click's option parser.
 // Cobra has no direct equivalent, so flag parsing is disabled entirely and
-// the flags click recognizes here (-c/--client, --no-unpause, --help) are
-// hand-parsed out of the raw args; everything else — including --timeout,
-// which click only accepts at the group level, and -h, which click never
-// binds — joins into POSITION exactly as click would pass it through. A
-// bare "--" ends flag recognition for the rest of the args.
+// only a fixed set of flags (-c/--client, --no-unpause, --help, --timeout —
+// the last ruled on 2026-07-10, ordinarily a root persistent flag click
+// only accepted at the group level) are hand-parsed out of the raw args.
+// Everything else joins POSITION exactly as click would pass it through,
+// including -h: click never bound it here, and this port doesn't either
+// (ruled 2026-07-10). This is not a general dash-letter-vs-dash-digit
+// classifier — it's an enumerated extractor. A leading "-" followed by a
+// digit is always a position (-30s, -1m); a leading "-" followed by a
+// letter is a position UNLESS it's one of the flags enumerated above, in
+// which case it's a flag. A bare "--" ends flag recognition for the rest
+// of the args.
 func newSeekCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "seek POSITION",
 		Short: "Seek to POSITION in the current media.",
 		Long: `Seek to POSITION in the current media.
 
-POSITION formats: absolute mm:ss (e.g. 1:30), relative +Ns or -Ns (e.g. +30s, -1m).`,
+POSITION formats: absolute mm:ss (e.g. 1:30), relative +Ns or -Ns (e.g. +30s, -1m).
+
+Flag parsing is hand-rolled so position formats like -30s survive: only
+-c/--client, --no-unpause, --help, and --timeout <seconds>/--timeout=<seconds>
+are recognized as flags. -h is not bound and joins POSITION like any other
+unrecognized token. Use "--" to force everything after it into POSITION.`,
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var client string
@@ -140,6 +152,18 @@ POSITION formats: absolute mm:ss (e.g. 1:30), relative +Ns or -Ns (e.g. +30s, -1
 					client = strings.TrimPrefix(a, "--client=")
 				case a == "--no-unpause":
 					noUnpause = true
+				case a == "--timeout":
+					i++
+					if i >= len(args) {
+						return fmt.Errorf("flag needs an argument: %s", a)
+					}
+					if err := setSeekTimeoutOverride(args[i]); err != nil {
+						return err
+					}
+				case strings.HasPrefix(a, "--timeout="):
+					if err := setSeekTimeoutOverride(strings.TrimPrefix(a, "--timeout=")); err != nil {
+						return err
+					}
 				default:
 					positionParts = append(positionParts, a)
 				}
@@ -154,6 +178,23 @@ POSITION formats: absolute mm:ss (e.g. 1:30), relative +Ns or -Ns (e.g. +30s, -1
 		},
 	}
 	return cmd
+}
+
+// setSeekTimeoutOverride applies seek's hand-parsed --timeout exactly as
+// root.go's PersistentPreRunE would for every other command, including the
+// W1 non-positive rejection — seek's DisableFlagParsing means root's own
+// boundary check never runs for this command, so this is the only place
+// that guards against reproducing the --timeout 0 hang here.
+func setSeekTimeoutOverride(raw string) error {
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fmt.Errorf("invalid value for '--timeout': '%s' is not a valid float", raw)
+	}
+	if v <= 0 {
+		return fmt.Errorf("invalid value for '--timeout': %v is not greater than 0", v)
+	}
+	api.SetTimeoutOverride(v)
+	return nil
 }
 
 func newVolumeCmd() *cobra.Command {
