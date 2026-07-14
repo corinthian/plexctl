@@ -34,8 +34,20 @@ func extractMetadata(hubResponse jsonx.J, typeFilter string) []jsonx.J {
 	return results
 }
 
-// itemScore mirrors _item_score: Plex returns `score` as a string like "1.5";
-// coerce safely. Missing/falsy/unparseable → 0.0.
+// Relevance tiers for the ranked hub endpoint.
+//
+// PMS normalises `score` to 0..1 and never returns 1.0: a character-for-character
+// title match tops out at ~0.93. A prefix match ("Alien" → Aliens) lands ~0.53,
+// and a weak partial ("Angry Men" → 12 Angry Men) shares the ~0.33 band with
+// outright noise ("Godfather" → His Dark Materials). No single floor separates
+// those last two, which is why SearchTiered widens rather than guessing.
+const (
+	TightMinScore = 0.5
+	LooseMinScore = 0.3
+)
+
+// itemScore coerces PMS's `score`, which arrives as a string like "0.93080".
+// Missing/falsy/unparseable → 0.0. The voice hub omits it entirely.
 func itemScore(item jsonx.J) float64 {
 	v, ok := item["score"]
 	if !ok || !jsonx.Truthy(v) {
@@ -82,30 +94,75 @@ func filterByScore(items []jsonx.J, minScore float64) []jsonx.J {
 	return out
 }
 
-// Search mirrors library.search. mediaType == "" means unfiltered.
-func Search(query, mediaType string, minScore float64) []jsonx.J {
-	if resp, err := api.TryGet("/hubs/search/voice", url.Values{"query": {query}}); err == nil {
-		results := filterByScore(extractMetadata(resp, mediaType), minScore)
-		if len(results) > 0 {
-			return results
-		}
-	}
-	// voice hub failed or came back empty after the score filter — fall back
-	// to the plain hub search.
+// sortByScoreDesc puts the best hit first. The hub endpoint ranks within a hub
+// but concatenates hubs in its own order, so a cross-type search needs this to
+// keep the strongest match at index 0 — which is what ResolveShow reads.
+func sortByScoreDesc(items []jsonx.J) []jsonx.J {
+	sort.SliceStable(items, func(i, j int) bool {
+		return itemScore(items[i]) > itemScore(items[j])
+	})
+	return items
+}
+
+// scoredSearch queries the ranked hub and filters by minScore.
+func scoredSearch(query, mediaType string, minScore float64) []jsonx.J {
 	params := url.Values{"query": {query}, "limit": {"10"}}
 	if code, ok := typeMap[mediaType]; ok {
 		params.Set("type", strconv.Itoa(code))
 	}
 	resp := api.Get("/hubs/search", params)
-	return filterByScore(extractMetadata(resp, mediaType), minScore)
+	return sortByScoreDesc(filterByScore(extractMetadata(resp, mediaType), minScore))
+}
+
+// voiceSearch queries the spoken-title hub, which serves dictation that mangled
+// a title past what the ranked index will match.
+//
+// It is never score-filtered: this endpoint omits `score` altogether, so every
+// item scores 0.0 and any floor above zero silently discards the whole response.
+// Its ordering is not relevance-ranked, so it is a last resort, never a first
+// choice.
+func voiceSearch(query, mediaType string) []jsonx.J {
+	resp, err := api.TryGet("/hubs/search/voice", url.Values{"query": {query}})
+	if err != nil {
+		return []jsonx.J{}
+	}
+	return extractMetadata(resp, mediaType)
+}
+
+// Search runs the ranked hub at an explicit floor, falling back to the voice hub
+// only when nothing scores. mediaType == "" means unfiltered.
+//
+// Callers wanting the default tight-then-loose behaviour should use SearchTiered.
+func Search(query, mediaType string, minScore float64) []jsonx.J {
+	if hits := scoredSearch(query, mediaType, minScore); len(hits) > 0 {
+		return hits
+	}
+	return voiceSearch(query, mediaType)
+}
+
+// SearchTiered is the default search path: take the confident matches if there
+// are any, otherwise widen to the band where a real partial title and a piece of
+// noise are indistinguishable — and say so via loose, so the caller can hedge.
+//
+// One HTTP call in every case: fetch at the loose floor and partition locally.
+func SearchTiered(query, mediaType string) (results []jsonx.J, loose bool) {
+	all := scoredSearch(query, mediaType, LooseMinScore)
+	if tight := filterByScore(all, TightMinScore); len(tight) > 0 {
+		return tight, false
+	}
+	if len(all) > 0 {
+		return all, true
+	}
+	return voiceSearch(query, mediaType), true
 }
 
 // ResolveShow mirrors library.resolve_show; nil when no hit.
 //
-// Disables the score filter — we only want the top hit, and a niche show may
-// score below the default threshold.
+// Tiered rather than unfiltered: it wants one best hit, and reading hits[0] off
+// an unranked list is how a niche show loses to noise. SearchTiered still widens
+// for the niche case, but ranks before it hands anything back.
 func ResolveShow(showQuery string) jsonx.J {
-	hits := Search(showQuery, "show", 0)
+	hits, _ := SearchTiered(showQuery, "show")
 	if len(hits) == 0 {
 		return nil
 	}

@@ -72,12 +72,12 @@ func TestSetAudioSetSubtitleGuardStrings(t *testing.T) {
 
 func TestBulkSetAudioAmbiguousShowRefusesNoWrites(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("GET", "/hubs/search/voice", map[string]any{
+	f.onJSON("GET", "/hubs/search", map[string]any{
 		"MediaContainer": map[string]any{
 			"Hub": []any{
 				map[string]any{"type": "show", "Metadata": []any{
-					map[string]any{"ratingKey": "1", "title": "Tom & Jerry", "type": "show", "score": "5"},
-					map[string]any{"ratingKey": "2", "title": "Tom & Jerry Kids", "type": "show", "score": "5"},
+					map[string]any{"ratingKey": "1", "title": "Tom & Jerry", "type": "show", "score": "0.93084"},
+					map[string]any{"ratingKey": "2", "title": "Tom & Jerry Kids", "type": "show", "score": "0.93071"},
 				}},
 			},
 		},
@@ -128,7 +128,7 @@ func TestBulkSetAudioNoShowFoundRefuses(t *testing.T) {
 
 func TestBulkSetAudioMultiSeasonWithoutAllSeasonsRefused(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("GET", "/hubs/search/voice", showHubResponse("1", "Show"))
+	f.onJSON("GET", "/hubs/search", showHubResponse("1", "Show"))
 	f.onJSON("GET", "/library/metadata/1/allLeaves", map[string]any{
 		"MediaContainer": map[string]any{
 			"Metadata": []any{
@@ -157,7 +157,7 @@ func TestBulkSetAudioMultiSeasonWithoutAllSeasonsRefused(t *testing.T) {
 
 func TestAuditAudioNdjsonStreamsRowsThenSummary(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("GET", "/hubs/search/voice", showHubResponse("SHOW1", "Foo Show"))
+	f.onJSON("GET", "/hubs/search", showHubResponse("SHOW1", "Foo Show"))
 	f.onJSON("GET", "/library/metadata/SHOW1/allLeaves", map[string]any{
 		"MediaContainer": map[string]any{
 			"Metadata": []any{

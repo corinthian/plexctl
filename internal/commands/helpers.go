@@ -41,19 +41,26 @@ func addClientFlag(cmd *cobra.Command) *string {
 	return client
 }
 
-// defaultMinScore mirrors cli._default_min_score: resolved at invocation
-// time (Python's callable default), not at flag-registration time, so
-// $PLEXCTL_SEARCH_MIN_SCORE is honored per run.
-func defaultMinScore() float64 {
-	raw, ok := os.LookupEnv("PLEXCTL_SEARCH_MIN_SCORE")
-	if !ok {
-		return 1.0
+// pinnedMinScore reports whether the caller pinned the relevance floor to a
+// single value, via --min-score or $PLEXCTL_SEARCH_MIN_SCORE. When nothing is
+// pinned, search uses the tiered default instead of any one floor.
+//
+// The env var is read per run, not at flag-registration time, so it stays
+// honoured across invocations. An unparseable value is ignored rather than
+// silently swallowing the search behind a bogus floor.
+func pinnedMinScore(cmd *cobra.Command) (float64, bool) {
+	if cmd.Flags().Changed("min-score") {
+		f, err := cmd.Flags().GetFloat64("min-score")
+		if err == nil {
+			return f, true
+		}
 	}
-	f, err := strconv.ParseFloat(raw, 64)
-	if err != nil {
-		return 1.0
+	if raw, ok := os.LookupEnv("PLEXCTL_SEARCH_MIN_SCORE"); ok {
+		if f, err := strconv.ParseFloat(raw, 64); err == nil {
+			return f, true
+		}
 	}
-	return f
+	return 0, false
 }
 
 // showIdentity mirrors cli._show_identity: echo the resolved show onto a

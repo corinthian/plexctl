@@ -192,7 +192,7 @@ func bulkSetAudio(show string, showRatingKey *string, language string, season *i
 			title = meta["title"]
 		}
 	} else {
-		hits := library.Search(show, "show", 1.0)
+		hits, _ := library.SearchTiered(show, "show")
 		distinct := map[string]bool{}
 		for _, h := range hits {
 			distinct[jsonx.AsStr(h["ratingKey"])] = true
