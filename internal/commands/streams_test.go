@@ -209,6 +209,46 @@ func TestBulkSetAudioMultiSeasonWithoutAllSeasonsRefused(t *testing.T) {
 	}
 }
 
+// The season-scope guard gates a bulk write: more than one season and it refuses
+// unless --season or --all-seasons is given. An unparented episode coerced to 0
+// invents a Specials season, so a genuinely single-season show looks like two and
+// the write is refused for a reason that does not exist.
+func TestBulkSetAudioSeasonGuardIgnoresUnparentedEpisodes(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("GET", "/hubs/search/voice", showHubResponse("1", "Show"))
+	f.onJSON("GET", "/library/metadata/1/allLeaves", map[string]any{
+		"MediaContainer": map[string]any{
+			"Metadata": []any{
+				map[string]any{"ratingKey": "10", "parentIndex": 4.0, "index": 1.0, "title": "S4E1"},
+				// No parentIndex. Must not be counted as a second (season-0) season.
+				map[string]any{"ratingKey": "11", "index": 2.0, "title": "Unparented"},
+			},
+		},
+	})
+	f.onJSON("GET", "/library/metadata/10", map[string]any{
+		"MediaContainer": map[string]any{
+			"Metadata": []any{
+				map[string]any{"ratingKey": "10", "Media": []any{
+					map[string]any{"Part": []any{
+						map[string]any{"id": 500.0, "Stream": []any{
+							map[string]any{"id": 1.0, "streamType": 2.0, "languageCode": "eng", "language": "English"},
+						}},
+					}},
+				}},
+			},
+		},
+	})
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"set-audio", "--show", "Show", "--language", "eng", "--dry-run"})
+	out, _ := testutil.Capture(t, func() { _ = root.Execute() })
+
+	got := mustUnmarshal(t, out)
+	if errStr, _ := got["error"].(string); strings.Contains(errStr, "spans") {
+		t.Fatalf("refused with %q — the show has one season; the unparented episode is not season 0", errStr)
+	}
+}
+
 func TestAuditAudioNdjsonStreamsRowsThenSummary(t *testing.T) {
 	f := newFakePMS(t)
 	f.onJSON("GET", "/hubs/search", showHubResponse("SHOW1", "Foo Show"))

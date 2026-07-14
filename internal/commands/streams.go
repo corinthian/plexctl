@@ -213,9 +213,15 @@ func bulkSetAudio(show string, showRatingKey *string, language string, season *i
 			"note": fmt.Sprintf("no episodes for show %s", jsonx.AsStr(showKey))}
 	}
 
+	// Count only episodes that actually declare a season. An unparented episode
+	// coerced to 0 invents a Specials season that does not exist — inflating the
+	// count that gates this bulk write, and turning a single-season show into a
+	// spurious "spans 2 seasons" refusal.
 	seasonSet := map[int]bool{}
 	for _, e := range episodes {
-		seasonSet[int(jsonx.Num(e["parentIndex"]))] = true
+		if s, ok := library.SeasonOf(e); ok {
+			seasonSet[s] = true
+		}
 	}
 	seasons := make([]int, 0, len(seasonSet))
 	for s := range seasonSet {

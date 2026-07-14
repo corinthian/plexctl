@@ -342,6 +342,35 @@ func ShowEpisodes(showQuery string, unwatchedOnly bool, season *int) []jsonx.J {
 // EpisodesForShowKey mirrors library.episodes_for_show_key. showKey may be a
 // string (from the CLI) or a float64 (a PMS ratingKey passed straight through
 // JSON) — render with jsonx.AsStr.
+// SeasonOf returns an episode's season, and whether it has one at all.
+//
+// An episode with no parentIndex is not in season 0 — it is unparented. jsonx.Num
+// coerces the absent value to 0, which silently files those episodes under
+// Specials: `--season 0` sweeps them up, and the bulk season-scope guard counts
+// them as a real season. On set-audio that means writing to episodes the user
+// never named. Python compared the raw value (`e.get("parentIndex") == season`),
+// so None never equalled 0 and they were excluded.
+//
+// Only a genuine number counts. Absent, null, or a non-numeric value means the
+// episode has no season, and callers must skip it rather than guess.
+func SeasonOf(e jsonx.J) (int, bool) {
+	switch v := e["parentIndex"].(type) {
+	case json.Number:
+		f, err := v.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return int(f), true
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	}
+	return 0, false
+}
+
 func EpisodesForShowKey(showKey any, unwatchedOnly bool, season *int) []jsonx.J {
 	resp := api.Get(fmt.Sprintf("/library/metadata/%s/allLeaves", jsonx.AsStr(showKey)), nil)
 	episodes := jsonx.MapList(jsonx.GetMap(resp, "MediaContainer"), "Metadata")
@@ -357,7 +386,7 @@ func EpisodesForShowKey(showKey any, unwatchedOnly bool, season *int) []jsonx.J 
 	if season != nil {
 		filtered := make([]jsonx.J, 0, len(episodes))
 		for _, e := range episodes {
-			if jsonx.Num(e["parentIndex"]) == float64(*season) {
+			if s, ok := SeasonOf(e); ok && s == *season {
 				filtered = append(filtered, e)
 			}
 		}
