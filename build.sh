@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p dist
-VERSION="${PLEXCTL_BUILD_VERSION:-1.0.0}"
+VERSION="${PLEXCTL_BUILD_VERSION:-1.0.1}"
 LDFLAGS="-s -w -X github.com/corinthian/plexctl/internal/api.Version=${VERSION}"
 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/plexctl-arm64 ./cmd/plexctl
 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/plexctl-amd64 ./cmd/plexctl

@@ -211,7 +211,8 @@ Total: 3h 47m
 - Title carries the movie year, or the show name alone — the Detail column holds `movie` or `S0xE0y — Episode Title`.
 - Description: first sentence of `summary`, ≤120 chars, `…` if cut. Omit column if all rows lack summary.
 - Empty result → `Nothing found for "<q>".`
-- Niche show with empty result → silently retry once with `--min-score 0` before reporting empty. **`--min-score` is a `search` flag only** — never append it to `play-latest`, `episodes`, or any non-`search` command. They reject it.
+- **Never pass `--min-score`, and never retry with it.** `search` widens on its own, so an empty result means the title is genuinely not in the library — report it and stop. The old rule here said to retry once with `--min-score 0`; that rule is dead and following it now actively hurts. `--min-score` bypasses the relevance guard, so retrying an empty result hands back whatever unrelated title ranked highest ("Godfather" → *Bring Her Back*). Empty is the honest answer; don't launder it into a wrong one. (It's also `search`-only — `play-latest` and `episodes` reject it.)
+- **`"loose": true` means the hit is plausible but unconfirmed** — a partial title that only half-matched, or a fuzzy recovery from mangled dictation ("blak buks" → Black Books). It is *not* junk: outright noise is dropped, and an absent title returns no matches rather than a loose guess. But don't present it as a clean find — name it and let the user confirm: `Closest I get is <Title> (<year>) — that it?`
 - **`search` caps at ~10 results.** For *whole-show* episode lists (e.g. "show me 30 unwatched"), don't lean on `search` — use `episodes "<show>"` (below), which enumerates the full show. `search` is for finding a title; `episodes` is for listing a show's episodes. Don't curl and don't iteratively mark-watched/restore to enumerate (both still banned).
 
 Debug: append `ratingKey` column.
@@ -744,15 +745,18 @@ The **On Deck list** is a user-curated staging list of episodes/movies — resol
 
 ---
 
+## Standing Shortcuts
+
+Two single-letter shortcuts, for hands-free and dictation use. Trigger only on a bare `q`, a bare `p`, or the bare word "queue" — case-insensitive, nothing else on the line.
+
+- **`q`** (and the bare verb **"queue"**) — *make ready whatever is on the On Deck list, paused.* Commit the current On Deck row-map to a Plex queue (`plexctl queue K1 K2 …`), then immediately `plexctl pause` and verify `now-playing` reports `paused`. Ready, **not** playing — that paused state is the goal, not an anomaly. Empty On Deck → nothing to make ready; say so and stop. Clear the On Deck list after a successful commit. Note `q` does **not** mean `queue-show`; to *see* the queue the user says "show queue".
+- **`p`** — *play.* Start or resume playback: an active queue → start/resume it (idle client with a loaded queue → bootstrap via `play-media` on the selected item); otherwise resume the current paused item; otherwise say "Nothing playing." and stop.
+
+---
+
 ## Personalisation
 
-Local to this server/user — not general plexctl behavior:
-
-- **Ambiguous parent/spinoff dictation prefers the spinoff.** When a dictated title could match either a show and a same-named spinoff (e.g. a spinoff titled "After the [Parent]"), search the spinoff first, falling back to the parent only if no spinoff exists. Pair with `--min-score 0` — exact-match misses titles starting with "The".
-- **Friday and Saturday nights are movie nights.** When building or suggesting an On Deck list / schedule for a Fri or Sat evening, lean toward movies over TV episodes. If the user adds episodes anyway, don't block. Weeknights have no preference.
-- **Always favour unwatched.** Any time the user refers to shows or movies — search, listing, recommendation, disambiguation, "what should I watch," title lookup — default to unwatched. Lead with unwatched titles, sort/filter watched ones down, and when a query could resolve to either a watched or unwatched candidate, prefer the unwatched one. Not an absolute exclusion — still surface watched titles when the user explicitly asks, says "already seen"/"rewatch"/"including watched," or when unwatched yields nothing — but unwatched is the default lens for every show/movie reference.
-- **Standing shortcuts (local to this user).** The verb **"queue"** and its shorthand **`q`** mean *make ready whatever is on the On Deck list, paused*: commit the current On Deck row-map to a Plex queue (`plexctl queue K1 K2 …`), then immediately `plexctl pause` and verify `now-playing` is `paused`. Ready, **not** playing. Empty On Deck → nothing to make ready; say so and stop. Consume (clear) the On Deck list after a successful commit. The shorthand **`p`** = **"play"** — start/resume playback: active queue → start/resume it (idle-with-loaded-queue → bootstrap via `play-media` on the selected item); else resume the current paused item; else say "Nothing playing." and stop. Trigger on a bare `q`, a bare `p`, or the bare word "queue" (case-insensitive, nothing else on the line). `q` no longer maps to `queue-show` — to *see* the queue the user says "show queue."
-- **Output: runtime + Total on every list** (see List Formatting Rules) — a standing human-friendliness preference.
+This section is the local-only personalization layer. It ships empty. Record user-specific preferences here in your local copy — viewing schedules, dictation habits, default lenses (e.g. watched vs. unwatched bias) — and do not commit them upstream.
 
 ---
 

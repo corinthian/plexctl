@@ -47,7 +47,9 @@ func showHubResponse(showRatingKey, showTitle string) map[string]any {
 		"MediaContainer": map[string]any{
 			"Hub": []any{
 				map[string]any{"type": "show", "Metadata": []any{
-					map[string]any{"ratingKey": showRatingKey, "title": showTitle, "type": "show", "score": "5"},
+					// 0.93 is what PMS actually returns for an exact title match; it
+					// never emits a score above 1.0.
+					map[string]any{"ratingKey": showRatingKey, "title": showTitle, "type": "show", "score": "0.93080"},
 				}},
 			},
 		},
@@ -56,7 +58,7 @@ func showHubResponse(showRatingKey, showTitle string) map[string]any {
 
 func TestEpisodesNdjsonStreamsRowsThenSummary(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("GET", "/hubs/search/voice", showHubResponse("SHOW1", "Foo Show"))
+	f.onJSON("GET", "/hubs/search", showHubResponse("SHOW1", "Foo Show"))
 	f.onJSON("GET", "/library/metadata/SHOW1/allLeaves", map[string]any{
 		"MediaContainer": map[string]any{
 			"Metadata": []any{

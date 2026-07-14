@@ -35,7 +35,10 @@ func newSearchCmd() *cobra.Command {
 		Long: `Search the library for QUERY. Returns ratingKey, title, type, and year per result.
 
 Use --type to restrict to show, movie, or episode. Use --json for full metadata.
-Use --min-score to control PMS relevance filtering (0 disables).`,
+
+By default, search returns confident matches only, and widens to weaker ones just
+when nothing confident exists — those carry "loose": true, meaning the hit may be
+noise. Use --min-score to pin a single floor instead (0 disables filtering).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := choiceError(cmd, "type", mediaType, "show", "movie", "episode"); err != nil {
@@ -46,13 +49,21 @@ Use --min-score to control PMS relevance filtering (0 disables).`,
 				output.Usage("query cannot be empty")
 				return nil
 			}
-			ms := minScore
-			if !cmd.Flags().Changed("min-score") {
-				ms = defaultMinScore()
+			// An explicit --min-score (or the env override) pins a single floor.
+			// Otherwise take the tiered default, which widens only if it must.
+			var results []jsonx.J
+			var loose bool
+			if ms, pinned := pinnedMinScore(cmd); pinned {
+				results = library.Search(query, mediaType, ms)
+			} else {
+				results, loose = library.SearchTiered(query, mediaType)
 			}
-			results := library.Search(query, mediaType, ms)
 			if asJSON {
-				output.Print(jsonx.J{"ok": true, "results": results})
+				out := jsonx.J{"ok": true, "results": results}
+				if loose && len(results) > 0 {
+					out["loose"] = true
+				}
+				output.Print(out)
 				return nil
 			}
 			if len(results) == 0 {
@@ -68,14 +79,20 @@ Use --min-score to control PMS relevance filtering (0 disables).`,
 					"year":      r["year"],
 				})
 			}
-			output.Print(jsonx.J{"ok": true, "results": summary})
+			out := jsonx.J{"ok": true, "results": summary}
+			if loose {
+				out["loose"] = true
+				out["note"] = "low-confidence match — no result cleared the confident threshold"
+			}
+			output.Print(out)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&mediaType, "type", "", "")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit full metadata JSON")
 	cmd.Flags().Float64Var(&minScore, "min-score", 0,
-		"Minimum PMS relevance score (0 disables filter; default 1.0 or $PLEXCTL_SEARCH_MIN_SCORE)")
+		"Pin the PMS relevance floor, disabling the tiered default (0 disables filtering; "+
+			"overridable via $PLEXCTL_SEARCH_MIN_SCORE). PMS scores 0..1: exact ~0.93, prefix ~0.53, weak ~0.33")
 	return cmd
 }
 
@@ -170,7 +187,7 @@ Use --key-only to resolve the ratingKey without starting playback.`,
 					output.Out(jsonx.J{"ok": false, "error": fmt.Sprintf("no unwatched episodes for: %s", jsonx.PyRepr(query))})
 					return nil
 				}
-				movies := library.Search(query, "movie", 1.0)
+				movies, _ := library.SearchTiered(query, "movie")
 				if len(movies) == 0 {
 					output.Out(jsonx.J{"ok": false, "error": fmt.Sprintf("nothing found for: %s", jsonx.PyRepr(query))})
 					return nil

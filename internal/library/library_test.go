@@ -144,100 +144,255 @@ func titles(items []jsonx.J) []string {
 	return out
 }
 
-// --- search: voice-first, fallback cascade -----------------------------------
+// --- search: ranked hub first, voice hub last ---------------------------------
+//
+// Fixture scores mirror the live server, which normalises `score` to 0..1 and
+// never returns 1.0. Measured against a real library: an exact title match tops
+// out at ~0.93, a prefix match ("Alien" → Aliens) lands ~0.53, and a weak-but-real
+// partial ("Angry Men" → 12 Angry Men) shares the ~0.33 band with pure noise
+// ("Godfather" → His Dark Materials). The voice hub omits `score` entirely.
+//
+// The v1.0.0 fixtures asserted scores of 2.5, 3.0 and 5 — values PMS cannot
+// produce. That is why a 1.0 default floor passed the suite while rejecting
+// every result the real server can return.
 
-func TestSearchVoiceHitShortCircuitsFallback(t *testing.T) {
+func TestSearchPrefersRankedHubOverVoice(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("movie",
-		jsonx.J{"title": "Real Match", "ratingKey": "1", "score": "2.5"},
-		jsonx.J{"title": "Junk", "ratingKey": "2", "score": "0.3"},
-	)))
-	f.onJSON("/hubs/search", hubResp()) // must not be hit
-
-	results := library.Search("rocky", "", 1.0)
-
-	if got := titles(results); len(got) != 1 || got[0] != "Real Match" {
-		t.Fatalf("results = %v, want [Real Match]", got)
-	}
-	if f.callCount("/hubs/search/voice") != 1 {
-		t.Fatalf("voice hub called %d times, want 1", f.callCount("/hubs/search/voice"))
-	}
-	if f.callCount("/hubs/search") != 0 {
-		t.Fatalf("fallback hub called %d times, want 0 (voice hub returned a real hit)", f.callCount("/hubs/search"))
-	}
-}
-
-func TestSearchVoiceErrorFallsBackToPlainHub(t *testing.T) {
-	f := newFakePMS(t)
-	f.onStatus("/hubs/search/voice", 500)
-	f.onJSON("/hubs/search", hubResp(hub("movie", jsonx.J{"title": "Real", "ratingKey": "1", "score": "2.0"})))
-
-	results := library.Search("rocky", "", 1.0)
-
-	if got := titles(results); len(got) != 1 || got[0] != "Real" {
-		t.Fatalf("results = %v, want [Real]", got)
-	}
-	if f.callCount("/hubs/search/voice") != 1 || f.callCount("/hubs/search") != 1 {
-		t.Fatalf("expected exactly one call to each endpoint, got voice=%d fallback=%d",
-			f.callCount("/hubs/search/voice"), f.callCount("/hubs/search"))
-	}
-}
-
-func TestSearchVoiceEmptyAfterFilterFallsBack(t *testing.T) {
-	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("movie", jsonx.J{"title": "Junk", "ratingKey": "1", "score": "0.2"})))
 	f.onJSON("/hubs/search", hubResp(hub("movie",
-		jsonx.J{"title": "Real", "ratingKey": "9", "score": "3.0"},
-		jsonx.J{"title": "Junk2", "ratingKey": "10", "score": "0.4"},
+		jsonx.J{"title": "Alien", "ratingKey": "107", "score": "0.93084"},
 	)))
-
-	results := library.Search("rocky", "", 1.0)
-
-	if got := titles(results); len(got) != 1 || got[0] != "Real" {
-		t.Fatalf("results = %v, want [Real]", got)
-	}
-	if f.callCount("/hubs/search/voice") != 1 || f.callCount("/hubs/search") != 1 {
-		t.Fatal("expected cascade through both endpoints")
-	}
-	q := f.lastQuery("/hubs/search")
-	if q.Get("query") != "rocky" || q.Get("limit") != "10" {
-		t.Fatalf("fallback params = %v, want query=rocky&limit=10", q)
-	}
-	if q.Has("type") {
-		t.Fatalf("fallback params carried unwanted type= for unfiltered search: %v", q)
-	}
-}
-
-// --- search: score filtering --------------------------------------------------
-
-func TestSearchScoreFiltering(t *testing.T) {
-	f := newFakePMS(t)
 	f.onJSON("/hubs/search/voice", hubResp(hub("movie",
-		jsonx.J{"title": "High", "score": "2.0"},
-		jsonx.J{"title": "ExactMatch", "score": 1.0},
-		jsonx.J{"title": "Low", "score": "0.5"},
-		jsonx.J{"title": "Missing"},
-		jsonx.J{"title": "Garbage", "score": "not-a-number"},
-		jsonx.J{"title": "NullScore", "score": nil},
-	)))
-	f.onJSON("/hubs/search", hubResp()) // fallback must not fire; results are non-empty
+		jsonx.J{"title": "Akira", "ratingKey": "31"},
+	))) // must not be consulted — this is where "Alien" used to return Akira
 
-	results := library.Search("asdf", "", 1.0)
-	if got := titles(results); len(got) != 2 || got[0] != "High" || got[1] != "ExactMatch" {
-		t.Fatalf("results = %v, want [High ExactMatch]", got)
+	results := library.Search("alien", "", library.TightMinScore)
+
+	if got := titles(results); len(got) != 1 || got[0] != "Alien" {
+		t.Fatalf("results = %v, want [Alien]", got)
+	}
+	if f.callCount("/hubs/search/voice") != 0 {
+		t.Fatalf("voice hub called %d times, want 0 — it is a last resort, not a first choice",
+			f.callCount("/hubs/search/voice"))
 	}
 }
+
+func TestSearchFallsBackToVoiceOnlyWhenNothingScores(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp()) // ranked hub knows nothing
+	f.onJSON("/hubs/search/voice", hubResp(hub("show",
+		jsonx.J{"title": "Black Books", "ratingKey": "1440"},
+	)))
+
+	// Dictation mangled the title past what the ranked index will match. This is
+	// the one thing the voice hub is good for.
+	results := library.Search("blak buks", "", library.TightMinScore)
+
+	if got := titles(results); len(got) != 1 || got[0] != "Black Books" {
+		t.Fatalf("results = %v, want [Black Books] — mangled dictation is what voice is for", got)
+	}
+}
+
+// The voice hub omits `score`, so every item coerces to 0.0. Applying a score
+// floor to it discards the entire response — the v1.0.0 bug in miniature. It is
+// gated on similarity to the query instead.
+func TestSearchNeverScoreFiltersTheVoiceHub(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp())
+	f.onJSON("/hubs/search/voice", hubResp(hub("movie",
+		jsonx.J{"title": "Unscored", "ratingKey": "1"},
+	)))
+
+	results := library.Search("Unscored", "", library.TightMinScore)
+
+	if got := titles(results); len(got) != 1 || got[0] != "Unscored" {
+		t.Fatalf("results = %v, want [Unscored] — voice results carry no score and must not be score-filtered", got)
+	}
+}
+
+// The voice hub is unranked and pads its response with unrelated titles. Without
+// a similarity floor, an absent title comes back as a confident-looking wrong
+// answer — "Godfather" → Convicted.
+func TestVoiceHubDropsDissimilarNoise(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp())
+	f.onJSON("/hubs/search/voice", hubResp(hub("movie",
+		jsonx.J{"title": "Convicted", "ratingKey": "45681"},
+		jsonx.J{"title": "Cop Car", "ratingKey": "268"},
+		jsonx.J{"title": "Dogtooth", "ratingKey": "307"},
+	)))
+
+	results := library.Search("Godfather", "", library.TightMinScore)
+
+	if len(results) != 0 {
+		t.Fatalf("results = %v, want none — none of these is remotely 'Godfather'", titles(results))
+	}
+}
+
+func TestVoiceHubSortsMostSimilarFirst(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp())
+	f.onJSON("/hubs/search/voice", hubResp(hub("show",
+		jsonx.J{"title": "Black Mirror", "ratingKey": "2"},
+		jsonx.J{"title": "Black Books", "ratingKey": "1440"},
+	)))
+
+	results := library.Search("blak buks", "", library.TightMinScore)
+
+	if got := titles(results); len(got) == 0 || got[0] != "Black Books" {
+		t.Fatalf("results = %v, want Black Books first — voice order is not relevance order", got)
+	}
+}
+
+// The regression guard: a real exact match must clear the default floor.
+func TestSearchExactMatchClearsDefaultFloor(t *testing.T) {
+	if library.TightMinScore >= 0.93 {
+		t.Fatalf("TightMinScore = %v — unreachable; no PMS result can score that high",
+			library.TightMinScore)
+	}
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("show",
+		jsonx.J{"title": "Black Books", "ratingKey": "1440", "score": "0.93071"},
+	)))
+
+	results, loose := library.SearchTiered("Black Books", "show")
+
+	if got := titles(results); len(got) != 1 || got[0] != "Black Books" {
+		t.Fatalf("results = %v, want [Black Books]", got)
+	}
+	if loose {
+		t.Fatal("loose = true for a 0.93 exact match, want false")
+	}
+}
+
+func TestSearchTieredDropsNoiseWhenAConfidentHitExists(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("movie",
+		jsonx.J{"title": "Alien", "ratingKey": "107", "score": "0.93084"},
+		jsonx.J{"title": "Aliens", "ratingKey": "108", "score": "0.53084"},
+		jsonx.J{"title": "Noise", "ratingKey": "999", "score": "0.33001"},
+	)))
+
+	results, loose := library.SearchTiered("Alien", "")
+
+	if got := titles(results); len(got) != 2 || got[0] != "Alien" || got[1] != "Aliens" {
+		t.Fatalf("results = %v, want [Alien Aliens] — 0.33-band noise must not ride along", got)
+	}
+	if loose {
+		t.Fatal("loose = true despite a confident hit, want false")
+	}
+}
+
+// A weak score with every query token present is not a guess — PMS just scores
+// partial titles badly. Token overlap recovers the confidence the score lost.
+func TestSearchTieredTrustsWeakScoreWhenAllTokensPresent(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("movie",
+		jsonx.J{"title": "12 Angry Men", "ratingKey": "37", "score": "0.33090"},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp()) // must not be needed
+
+	results, loose := library.SearchTiered("Angry Men", "")
+
+	if got := titles(results); len(got) != 1 || got[0] != "12 Angry Men" {
+		t.Fatalf("results = %v, want [12 Angry Men]", got)
+	}
+	if loose {
+		t.Fatal("loose = true, want false — every query token is in the title; the 0.33 is PMS being bad at partials")
+	}
+	if f.callCount("/hubs/search") != 1 {
+		t.Fatalf("ranked hub called %d times, want 1 — tiering partitions locally, it does not re-fetch",
+			f.callCount("/hubs/search"))
+	}
+}
+
+// The noise case the score cannot distinguish: same 0.33 band, but the title
+// shares nothing with the query. "Godfather" is not in the library; returning
+// His Dark Materials would be worse than returning nothing.
+func TestSearchTieredDropsZeroOverlapNoise(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("show",
+		jsonx.J{"title": "His Dark Materials", "ratingKey": "500", "score": "0.33078"},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp())
+
+	results, _ := library.SearchTiered("Godfather", "")
+
+	if len(results) != 0 {
+		t.Fatalf("results = %v, want none — a hit sharing no token with the query is noise", titles(results))
+	}
+}
+
+// The bug this cost us: "Akira" (a movie) matched a show in the noise band, and
+// play-latest started an Evangelion episode instead of the film.
+func TestSearchTieredDoesNotBindAkiraToEvangelion(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("show",
+		jsonx.J{"title": "Neon Genesis Evangelion", "ratingKey": "1961", "score": "0.33086"},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp())
+
+	if hit := library.ResolveShow("Akira"); hit != nil {
+		t.Fatalf("ResolveShow(Akira) = %#v, want nil — no show in this library is Akira", hit)
+	}
+}
+
+// Prefix tolerance: dictation drops inflections constantly.
+func TestSearchTieredToleratesInflection(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("show",
+		jsonx.J{"title": "The Simpsons", "ratingKey": "20", "score": "0.33"},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp())
+
+	results, _ := library.SearchTiered("Simpson", "show")
+
+	if got := titles(results); len(got) != 1 || got[0] != "The Simpsons" {
+		t.Fatalf("results = %v, want [The Simpsons] — 'Simpson' must reach 'Simpsons'", got)
+	}
+}
+
+// ...but the tolerance must not manufacture matches from stubs.
+func TestSearchTieredPrefixToleranceDoesNotMatchShortStubs(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("movie",
+		jsonx.J{"title": "Dennis the Menace", "ratingKey": "77", "score": "0.33"},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp())
+
+	results, _ := library.SearchTiered("Angry Men", "")
+
+	if len(results) != 0 {
+		t.Fatalf("results = %v, want none — 'Men' must not prefix-match 'Menace'", titles(results))
+	}
+}
+
+// ResolveShow reads index 0, so cross-hub ordering is load-bearing.
+func TestSearchSortsBestHitFirstAcrossHubs(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(
+		hub("movie", jsonx.J{"title": "Weak Movie", "score": "0.53000"}),
+		hub("show", jsonx.J{"title": "Strong Show", "score": "0.93000"}),
+	))
+
+	results, _ := library.SearchTiered("q", "")
+
+	if got := titles(results); len(got) != 2 || got[0] != "Strong Show" {
+		t.Fatalf("results = %v, want Strong Show first — hub order is not relevance order", got)
+	}
+}
+
+// --- search: explicit floor ---------------------------------------------------
 
 func TestSearchMinScoreZeroDisablesFilter(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("movie",
-		jsonx.J{"title": "Real", "ratingKey": "1", "score": "2.5"},
-		jsonx.J{"title": "Junk", "ratingKey": "2", "score": "0.3"},
+	f.onJSON("/hubs/search", hubResp(hub("movie",
+		jsonx.J{"title": "Real", "ratingKey": "1", "score": "0.93"},
+		jsonx.J{"title": "Junk", "ratingKey": "2", "score": "0.33"},
 		jsonx.J{"title": "NoScore", "ratingKey": "3"},
 	)))
 
 	results := library.Search("asdfqwerzxcv", "", 0)
-	want := []string{"Real", "Junk", "NoScore"}
+	want := []string{"Real", "Junk", "NoScore"} // score-desc; unscored sinks last
 	got := titles(results)
 	if len(got) != len(want) {
 		t.Fatalf("results = %v, want %v", got, want)
@@ -249,13 +404,31 @@ func TestSearchMinScoreZeroDisablesFilter(t *testing.T) {
 	}
 }
 
+func TestSearchDropsUnparseableAndMissingScoresAtAFloor(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("movie",
+		jsonx.J{"title": "Exact", "score": "0.93080"},
+		jsonx.J{"title": "Prefix", "score": 0.53},
+		jsonx.J{"title": "Weak", "score": "0.33000"},
+		jsonx.J{"title": "Missing"},
+		jsonx.J{"title": "Garbage", "score": "not-a-number"},
+		jsonx.J{"title": "NullScore", "score": nil},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp()) // must not fire; results are non-empty
+
+	results := library.Search("asdf", "", library.TightMinScore)
+	if got := titles(results); len(got) != 2 || got[0] != "Exact" || got[1] != "Prefix" {
+		t.Fatalf("results = %v, want [Exact Prefix]", got)
+	}
+}
+
 // --- search: hub type filtering -----------------------------------------------
 
 func TestSearchFiltersByHubType(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(
-		hub("movie", jsonx.J{"title": "MovieHit", "score": "5"}),
-		hub("show", jsonx.J{"title": "ShowHit", "score": "5"}),
+	f.onJSON("/hubs/search", hubResp(
+		hub("movie", jsonx.J{"title": "MovieHit", "score": "0.93"}),
+		hub("show", jsonx.J{"title": "ShowHit", "score": "0.93"}),
 	))
 
 	if got := titles(library.Search("q", "show", 0)); len(got) != 1 || got[0] != "ShowHit" {
@@ -269,48 +442,76 @@ func TestSearchFiltersByHubType(t *testing.T) {
 	}
 }
 
-func TestSearchFallbackSendsTypeCodeForKnownMediaType(t *testing.T) {
+func TestSearchSendsTypeCodeForKnownMediaType(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp()) // empty -> force fallback
-	f.onJSON("/hubs/search", hubResp(hub("show", jsonx.J{"title": "Show", "score": "5"})))
+	f.onJSON("/hubs/search", hubResp(hub("show", jsonx.J{"title": "Show", "score": "0.93"})))
 
 	library.Search("q", "show", 0)
 
 	q := f.lastQuery("/hubs/search")
 	if q.Get("type") != "2" {
-		t.Fatalf("fallback type param = %q, want 2 (show)", q.Get("type"))
+		t.Fatalf("type param = %q, want 2 (show)", q.Get("type"))
+	}
+	if q.Get("query") != "q" || q.Get("limit") != "10" {
+		t.Fatalf("params = %v, want query=q&limit=10", q)
+	}
+}
+
+func TestSearchOmitsTypeCodeWhenUnfiltered(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("movie", jsonx.J{"title": "M", "score": "0.93"})))
+
+	library.Search("rocky", "", 0)
+
+	if q := f.lastQuery("/hubs/search"); q.Has("type") {
+		t.Fatalf("params carried unwanted type= for an unfiltered search: %v", q)
 	}
 }
 
 func TestSearchEmptyResultMarshalsAsJSONArrayNotNull(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp())
 	f.onJSON("/hubs/search", hubResp())
+	f.onJSON("/hubs/search/voice", hubResp())
 
-	results := library.Search("asdfqwerzxcv", "", 1.0)
+	results := library.Search("asdfqwerzxcv", "", library.TightMinScore)
 	if got := jsonx.Marshal(results); got != "[]" {
-		t.Fatalf("Marshal(empty results) = %q, want \"[]\" (Python returns [] on stdout, never null)", got)
+		t.Fatalf("Marshal(empty results) = %q, want \"[]\" (never null on stdout)", got)
 	}
 }
 
-// --- resolve_show: disables the score floor -----------------------------------
+// --- resolve_show -------------------------------------------------------------
 
-func TestResolveShowDisablesScoreFilter(t *testing.T) {
+// A niche show scoring in the weak band must still resolve — that is what the
+// loose tier is for. It just has to actually be the thing that was asked for.
+func TestResolveShowWidensToTheWeakBand(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("show",
-		jsonx.J{"title": "NicheShow", "ratingKey": "99", "score": "0.2"},
+	f.onJSON("/hubs/search", hubResp(hub("show",
+		jsonx.J{"title": "Niche Show", "ratingKey": "99", "score": "0.33"},
 	)))
 
 	hit := library.ResolveShow("niche")
 	if hit == nil || hit["ratingKey"] != "99" {
-		t.Fatalf("hit = %#v, want ratingKey 99 despite sub-threshold score", hit)
+		t.Fatalf("hit = %#v, want ratingKey 99 — a weak score is still a hit", hit)
+	}
+}
+
+func TestResolveShowPrefersStrongestHit(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("show",
+		jsonx.J{"title": "Weak", "ratingKey": "1", "score": "0.53"},
+		jsonx.J{"title": "Exact", "ratingKey": "2", "score": "0.93"},
+	)))
+
+	hit := library.ResolveShow("exact")
+	if hit == nil || hit["ratingKey"] != "2" {
+		t.Fatalf("hit = %#v, want ratingKey 2 (the 0.93 hit), not whatever the hub listed first", hit)
 	}
 }
 
 func TestResolveShowNoHitsReturnsNil(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp())
 	f.onJSON("/hubs/search", hubResp())
+	f.onJSON("/hubs/search/voice", hubResp())
 
 	if hit := library.ResolveShow("nonexistent"); hit != nil {
 		t.Fatalf("hit = %#v, want nil", hit)
@@ -395,7 +596,7 @@ func TestEpisodesForShowKeyNumericKeyRendersWithoutDecimal(t *testing.T) {
 
 func TestShowEpisodesResolvesThenEnumerates(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "5"})))
+	f.onJSON("/hubs/search", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "0.93080"})))
 	f.onJSON("/library/metadata/SHOW1/allLeaves", leavesResp(ep(1, 2, 0, "", "", "2"), ep(1, 1, 0, "", "", "1")))
 
 	eps := library.ShowEpisodes("some show", false, nil)
@@ -417,7 +618,7 @@ func TestShowEpisodesNoMatchReturnsEmptyWithoutFetch(t *testing.T) {
 
 func TestShowEpisodesNoLeavesReturnsEmpty(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "5"})))
+	f.onJSON("/hubs/search", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "0.93080"})))
 	f.onJSON("/library/metadata/SHOW1/allLeaves", leavesResp())
 
 	eps := library.ShowEpisodes("some show", false, nil)
@@ -430,7 +631,7 @@ func TestShowEpisodesNoLeavesReturnsEmpty(t *testing.T) {
 
 func TestLatestUnwatchedReturnsFirstUnwatched(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "5"})))
+	f.onJSON("/hubs/search", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "0.93080"})))
 	f.onJSON("/library/metadata/SHOW1/allLeaves", leavesResp(
 		ep(1, 1, 1, "2019-01-01", "Watched", "1"),
 		ep(1, 2, 0, "2019-02-01", "NextUp", "2"),
@@ -445,7 +646,7 @@ func TestLatestUnwatchedReturnsFirstUnwatched(t *testing.T) {
 
 func TestLatestUnwatchedStrictReturnsNilWhenAllWatched(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "5"})))
+	f.onJSON("/hubs/search", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "0.93080"})))
 	f.onJSON("/library/metadata/SHOW1/allLeaves", leavesResp(
 		ep(1, 1, 1, "", "", "1"), ep(1, 2, 3, "", "", "2"),
 	))
@@ -457,7 +658,7 @@ func TestLatestUnwatchedStrictReturnsNilWhenAllWatched(t *testing.T) {
 
 func TestLatestUnwatchedFallsBackToLatestAiredNotPilot(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "5"})))
+	f.onJSON("/hubs/search", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "0.93080"})))
 	f.onJSON("/library/metadata/SHOW1/allLeaves", leavesResp(
 		ep(1, 1, 1, "2019-01-01", "Pilot", "1"),
 		ep(1, 2, 1, "2019-02-01", "", "2"),
@@ -473,7 +674,7 @@ func TestLatestUnwatchedFallsBackToLatestAiredNotPilot(t *testing.T) {
 
 func TestLatestUnwatchedTieBreakKeepsFirstMaximal(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("/hubs/search/voice", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "5"})))
+	f.onJSON("/hubs/search", hubResp(hub("show", jsonx.J{"ratingKey": "SHOW1", "title": "Some Show", "score": "0.93080"})))
 	// Both watched, tied on originallyAvailableAt; sorted order puts (1,1) before (1,2).
 	f.onJSON("/library/metadata/SHOW1/allLeaves", leavesResp(
 		ep(1, 1, 1, "2020-01-01", "First", "1"),

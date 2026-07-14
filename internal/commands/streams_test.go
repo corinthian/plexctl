@@ -1,6 +1,7 @@
 package commands_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/corinthian/plexctl/internal/commands"
@@ -72,12 +73,12 @@ func TestSetAudioSetSubtitleGuardStrings(t *testing.T) {
 
 func TestBulkSetAudioAmbiguousShowRefusesNoWrites(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("GET", "/hubs/search/voice", map[string]any{
+	f.onJSON("GET", "/hubs/search", map[string]any{
 		"MediaContainer": map[string]any{
 			"Hub": []any{
 				map[string]any{"type": "show", "Metadata": []any{
-					map[string]any{"ratingKey": "1", "title": "Tom & Jerry", "type": "show", "score": "5"},
-					map[string]any{"ratingKey": "2", "title": "Tom & Jerry Kids", "type": "show", "score": "5"},
+					map[string]any{"ratingKey": "1", "title": "Tom & Jerry", "type": "show", "score": "0.93084"},
+					map[string]any{"ratingKey": "2", "title": "Tom & Jerry Kids", "type": "show", "score": "0.93071"},
 				}},
 			},
 		},
@@ -99,6 +100,59 @@ func TestBulkSetAudioAmbiguousShowRefusesNoWrites(t *testing.T) {
 	}
 	if n := f.countMethod("PUT"); n != 0 {
 		t.Fatalf("PUT calls = %d, want 0 (ambiguity must refuse before any write)", n)
+	}
+}
+
+// The bulk resolver feeds a write. It counts distinct ratingKeys and refuses on
+// more than one, so anything that inflates the hit set turns a clean resolve into
+// a spurious "ambiguous show" refusal. The tiered search widens into the weak
+// band when nothing scores confidently — this pins that the token guard keeps
+// noise out of that count, so a real show still resolves to exactly one hit.
+func TestBulkSetAudioResolverIsNotInflatedByWeakBandNoise(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("GET", "/hubs/search", map[string]any{
+		"MediaContainer": map[string]any{
+			"Hub": []any{
+				map[string]any{"type": "show", "Metadata": []any{
+					map[string]any{"ratingKey": "1440", "title": "Black Books", "type": "show", "score": "0.93071"},
+					// Weak-band noise sharing no token with the query. It must not
+					// reach the ambiguity guard.
+					map[string]any{"ratingKey": "999", "title": "His Dark Materials", "type": "show", "score": "0.33078"},
+				}},
+			},
+		},
+	})
+	f.onJSON("GET", "/library/metadata/1440/allLeaves", map[string]any{
+		"MediaContainer": map[string]any{
+			"Metadata": []any{
+				map[string]any{"ratingKey": "10", "parentIndex": 1.0, "index": 1.0, "title": "S1E1"},
+			},
+		},
+	})
+	f.onJSON("GET", "/library/metadata/10", map[string]any{
+		"MediaContainer": map[string]any{
+			"Metadata": []any{
+				map[string]any{"ratingKey": "10", "Media": []any{
+					map[string]any{"Part": []any{
+						map[string]any{"id": 500.0, "Stream": []any{
+							map[string]any{"id": 1.0, "streamType": 2.0, "languageCode": "eng", "language": "English"},
+						}},
+					}},
+				}},
+			},
+		},
+	})
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"set-audio", "--show", "Black Books", "--language", "eng", "--dry-run"})
+	out, _ := testutil.Capture(t, func() { _ = root.Execute() })
+
+	got := mustUnmarshal(t, out)
+	if errStr, _ := got["error"].(string); strings.Contains(errStr, "ambiguous") {
+		t.Fatalf("resolver refused as ambiguous: %q — weak-band noise must not reach the distinct count", errStr)
+	}
+	if got["ok"] != true {
+		t.Fatalf("got %#v, want a clean resolve to Black Books", got)
 	}
 }
 
@@ -128,7 +182,7 @@ func TestBulkSetAudioNoShowFoundRefuses(t *testing.T) {
 
 func TestBulkSetAudioMultiSeasonWithoutAllSeasonsRefused(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("GET", "/hubs/search/voice", showHubResponse("1", "Show"))
+	f.onJSON("GET", "/hubs/search", showHubResponse("1", "Show"))
 	f.onJSON("GET", "/library/metadata/1/allLeaves", map[string]any{
 		"MediaContainer": map[string]any{
 			"Metadata": []any{
@@ -157,7 +211,7 @@ func TestBulkSetAudioMultiSeasonWithoutAllSeasonsRefused(t *testing.T) {
 
 func TestAuditAudioNdjsonStreamsRowsThenSummary(t *testing.T) {
 	f := newFakePMS(t)
-	f.onJSON("GET", "/hubs/search/voice", showHubResponse("SHOW1", "Foo Show"))
+	f.onJSON("GET", "/hubs/search", showHubResponse("SHOW1", "Foo Show"))
 	f.onJSON("GET", "/library/metadata/SHOW1/allLeaves", map[string]any{
 		"MediaContainer": map[string]any{
 			"Metadata": []any{
