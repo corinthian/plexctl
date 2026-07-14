@@ -9,7 +9,9 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
@@ -94,6 +96,123 @@ func filterByScore(items []jsonx.J, minScore float64) []jsonx.J {
 	return out
 }
 
+// stopWords are ignored when comparing a query against a title: they carry no
+// discriminating signal and would otherwise let "The Godfather" match "The
+// Changeling" on the article alone.
+var stopWords = map[string]bool{"the": true, "a": true, "an": true, "of": true, "and": true}
+
+// tokenize lowercases, strips punctuation, and drops stop words.
+func tokenize(s string) []string {
+	fields := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if !stopWords[f] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// titleOverlap reports how many of query's tokens appear in title, and whether
+// every one of them does.
+//
+// This is the discriminator PMS's own score lacks. In the weak band a real
+// partial ("Angry Men" → 12 Angry Men) and pure noise ("Godfather" → His Dark
+// Materials) score identically at ~0.33 — but the first shares its tokens with
+// the title and the second shares none. Unlike the score thresholds, this does
+// not depend on how PMS happens to tune its scorer.
+func titleOverlap(query, title string) (shared int, full bool) {
+	qt := tokenize(query)
+	if len(qt) == 0 {
+		return 0, false // nothing to discriminate on; caller should not filter
+	}
+	tt := tokenize(title)
+	for _, q := range qt {
+		for _, t := range tt {
+			if tokensMatch(q, t) {
+				shared++
+				break
+			}
+		}
+	}
+	return shared, shared == len(qt)
+}
+
+// tokensMatch treats one token as a prefix of the other as a match, so dictation
+// that drops an inflection still lands: "Simpson" → Simpsons, "Alien" → Aliens.
+//
+// The 4-rune floor keeps that tolerance from manufacturing matches out of stubs
+// — without it "Men" would match "Menace", and the noise this whole check exists
+// to reject would walk straight back in.
+func tokensMatch(a, b string) bool {
+	if a == b {
+		return true
+	}
+	short, long := a, b
+	if len(short) > len(long) {
+		short, long = long, short
+	}
+	return len([]rune(short)) >= 4 && strings.HasPrefix(long, short)
+}
+
+// normalise reduces a string to lowercase alphanumerics for fuzzy comparison.
+func normalise(s string) []rune {
+	out := make([]rune, 0, len(s))
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// similarity is normalised Levenshtein: 1.0 identical, 0.0 nothing in common.
+//
+// This exists for the voice hub, whose whole value is matching a title the user
+// mangled — "blak buks" → Black Books — which by construction shares no clean
+// token with what it matched, so titleOverlap cannot judge it. The voice hub is
+// unranked and returns unrelated titles alongside the right one, so without a
+// similarity floor an absent title like "Godfather" comes back as "Convicted".
+func similarity(a, b string) float64 {
+	ra, rb := normalise(a), normalise(b)
+	if len(ra) == 0 || len(rb) == 0 {
+		return 0
+	}
+	prev := make([]int, len(rb)+1)
+	cur := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, min(cur[j-1]+1, prev[j-1]+cost))
+		}
+		prev, cur = cur, prev
+	}
+	dist := prev[len(rb)]
+	longest := max(len(ra), len(rb))
+	return 1 - float64(dist)/float64(longest)
+}
+
+// VoiceMinSimilarity gates the voice hub's unranked output.
+//
+// Measured against the live server. Real manglings clear it comfortably —
+// "blak buks" → Black Books 0.70, "sopranoes" → The Sopranos 0.64 — while the
+// nearest voice hit for an absent title tops out at 0.44 ("blak buks" → Billy
+// Budd), and "Godfather" → Convicted sits at 0.22.
+//
+// Nothing separates every case: "blakebux" → Black Books scores 0.40, below the
+// junk ceiling. A title mangled that far is unrecoverable without also admitting
+// noise, and an honest miss beats a confident wrong answer.
+const VoiceMinSimilarity = 0.5
+
 // sortByScoreDesc puts the best hit first. The hub endpoint ranks within a hub
 // but concatenates hubs in its own order, so a cross-type search needs this to
 // keep the strongest match at index 0 — which is what ResolveShow reads.
@@ -118,15 +237,28 @@ func scoredSearch(query, mediaType string, minScore float64) []jsonx.J {
 // a title past what the ranked index will match.
 //
 // It is never score-filtered: this endpoint omits `score` altogether, so every
-// item scores 0.0 and any floor above zero silently discards the whole response.
-// Its ordering is not relevance-ranked, so it is a last resort, never a first
-// choice.
+// item scores 0.0 and any floor above zero silently discards the whole response
+// — the v1.0.0 bug. It is also unranked and returns unrelated titles beside the
+// right one, so it is gated on similarity instead and sorted best-first.
 func voiceSearch(query, mediaType string) []jsonx.J {
 	resp, err := api.TryGet("/hubs/search/voice", url.Values{"query": {query}})
 	if err != nil {
 		return []jsonx.J{}
 	}
-	return extractMetadata(resp, mediaType)
+	items := extractMetadata(resp, mediaType)
+	kept := make([]jsonx.J, 0, len(items))
+	for _, item := range items {
+		title, _ := item["title"].(string)
+		if similarity(query, title) >= VoiceMinSimilarity {
+			kept = append(kept, item)
+		}
+	}
+	sort.SliceStable(kept, func(i, j int) bool {
+		ti, _ := kept[i]["title"].(string)
+		tj, _ := kept[j]["title"].(string)
+		return similarity(query, ti) > similarity(query, tj)
+	})
+	return kept
 }
 
 // Search runs the ranked hub at an explicit floor, falling back to the voice hub
@@ -140,19 +272,48 @@ func Search(query, mediaType string, minScore float64) []jsonx.J {
 	return voiceSearch(query, mediaType)
 }
 
-// SearchTiered is the default search path: take the confident matches if there
-// are any, otherwise widen to the band where a real partial title and a piece of
-// noise are indistinguishable — and say so via loose, so the caller can hedge.
+// SearchTiered is the default search path. It classifies each scored hit as
+// confident, weak, or noise, and returns the best class it found.
 //
-// One HTTP call in every case: fetch at the loose floor and partition locally.
+//	score >= TightMinScore   confident — trust the score, no token check. A prefix
+//	                         match ("Alien" → Aliens) shares no whole token with
+//	                         the query but is exactly what the user meant.
+//	weak band, all tokens    confident — "Angry Men" → 12 Angry Men scores 0.33,
+//	                         the same as noise, but every query token is present.
+//	weak band, some tokens   loose — plausible; let the caller hedge.
+//	weak band, no tokens     noise — dropped. "Godfather" → His Dark Materials.
+//
+// Dropping the no-overlap hits is what stops an absent title from resolving to
+// something unrelated — including "Akira" binding to Neon Genesis Evangelion and
+// starting an Evangelion episode instead of the film.
+//
+// One HTTP call: fetch at the loose floor and partition locally.
 func SearchTiered(query, mediaType string) (results []jsonx.J, loose bool) {
 	all := scoredSearch(query, mediaType, LooseMinScore)
-	if tight := filterByScore(all, TightMinScore); len(tight) > 0 {
-		return tight, false
+
+	confident := make([]jsonx.J, 0, len(all))
+	weak := make([]jsonx.J, 0, len(all))
+	for _, item := range all {
+		title, _ := item["title"].(string)
+		shared, full := titleOverlap(query, title)
+		switch {
+		case itemScore(item) >= TightMinScore, full:
+			confident = append(confident, item)
+		case shared > 0:
+			weak = append(weak, item)
+		}
+		// shared == 0 in the weak band → noise; dropped.
 	}
-	if len(all) > 0 {
-		return all, true
+
+	if len(confident) > 0 {
+		return confident, false
 	}
+	if len(weak) > 0 {
+		return weak, true
+	}
+	// Nothing survived. The voice hub is the last resort — it exists precisely for
+	// dictation mangled past what the ranked index (or a token match) will find,
+	// so it is exempt from both filters.
 	return voiceSearch(query, mediaType), true
 }
 

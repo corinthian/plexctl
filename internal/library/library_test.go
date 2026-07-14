@@ -183,15 +183,18 @@ func TestSearchFallsBackToVoiceOnlyWhenNothingScores(t *testing.T) {
 		jsonx.J{"title": "Black Books", "ratingKey": "1440"},
 	)))
 
-	results := library.Search("blakebux", "", library.TightMinScore)
+	// Dictation mangled the title past what the ranked index will match. This is
+	// the one thing the voice hub is good for.
+	results := library.Search("blak buks", "", library.TightMinScore)
 
 	if got := titles(results); len(got) != 1 || got[0] != "Black Books" {
 		t.Fatalf("results = %v, want [Black Books] — mangled dictation is what voice is for", got)
 	}
 }
 
-// The voice hub omits `score`, so every item coerces to 0.0. Applying a floor to
-// it discards the entire response — the v1.0.0 bug in miniature.
+// The voice hub omits `score`, so every item coerces to 0.0. Applying a score
+// floor to it discards the entire response — the v1.0.0 bug in miniature. It is
+// gated on similarity to the query instead.
 func TestSearchNeverScoreFiltersTheVoiceHub(t *testing.T) {
 	f := newFakePMS(t)
 	f.onJSON("/hubs/search", hubResp())
@@ -199,10 +202,44 @@ func TestSearchNeverScoreFiltersTheVoiceHub(t *testing.T) {
 		jsonx.J{"title": "Unscored", "ratingKey": "1"},
 	)))
 
-	results := library.Search("q", "", library.TightMinScore)
+	results := library.Search("Unscored", "", library.TightMinScore)
 
 	if got := titles(results); len(got) != 1 || got[0] != "Unscored" {
-		t.Fatalf("results = %v, want [Unscored] — voice results must survive a score floor", got)
+		t.Fatalf("results = %v, want [Unscored] — voice results carry no score and must not be score-filtered", got)
+	}
+}
+
+// The voice hub is unranked and pads its response with unrelated titles. Without
+// a similarity floor, an absent title comes back as a confident-looking wrong
+// answer — "Godfather" → Convicted.
+func TestVoiceHubDropsDissimilarNoise(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp())
+	f.onJSON("/hubs/search/voice", hubResp(hub("movie",
+		jsonx.J{"title": "Convicted", "ratingKey": "45681"},
+		jsonx.J{"title": "Cop Car", "ratingKey": "268"},
+		jsonx.J{"title": "Dogtooth", "ratingKey": "307"},
+	)))
+
+	results := library.Search("Godfather", "", library.TightMinScore)
+
+	if len(results) != 0 {
+		t.Fatalf("results = %v, want none — none of these is remotely 'Godfather'", titles(results))
+	}
+}
+
+func TestVoiceHubSortsMostSimilarFirst(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp())
+	f.onJSON("/hubs/search/voice", hubResp(hub("show",
+		jsonx.J{"title": "Black Mirror", "ratingKey": "2"},
+		jsonx.J{"title": "Black Books", "ratingKey": "1440"},
+	)))
+
+	results := library.Search("blak buks", "", library.TightMinScore)
+
+	if got := titles(results); len(got) == 0 || got[0] != "Black Books" {
+		t.Fatalf("results = %v, want Black Books first — voice order is not relevance order", got)
 	}
 }
 
@@ -245,10 +282,10 @@ func TestSearchTieredDropsNoiseWhenAConfidentHitExists(t *testing.T) {
 	}
 }
 
-func TestSearchTieredWidensAndFlagsLooseWhenOnlyWeakHits(t *testing.T) {
+// A weak score with every query token present is not a guess — PMS just scores
+// partial titles badly. Token overlap recovers the confidence the score lost.
+func TestSearchTieredTrustsWeakScoreWhenAllTokensPresent(t *testing.T) {
 	f := newFakePMS(t)
-	// "Angry Men" → 12 Angry Men is genuinely what the user meant, but PMS scores
-	// it in the same band as noise. Return it, and admit the uncertainty.
 	f.onJSON("/hubs/search", hubResp(hub("movie",
 		jsonx.J{"title": "12 Angry Men", "ratingKey": "37", "score": "0.33090"},
 	)))
@@ -259,12 +296,73 @@ func TestSearchTieredWidensAndFlagsLooseWhenOnlyWeakHits(t *testing.T) {
 	if got := titles(results); len(got) != 1 || got[0] != "12 Angry Men" {
 		t.Fatalf("results = %v, want [12 Angry Men]", got)
 	}
-	if !loose {
-		t.Fatal("loose = false for a 0.33-band hit, want true — the caller must be able to hedge")
+	if loose {
+		t.Fatal("loose = true, want false — every query token is in the title; the 0.33 is PMS being bad at partials")
 	}
 	if f.callCount("/hubs/search") != 1 {
 		t.Fatalf("ranked hub called %d times, want 1 — tiering partitions locally, it does not re-fetch",
 			f.callCount("/hubs/search"))
+	}
+}
+
+// The noise case the score cannot distinguish: same 0.33 band, but the title
+// shares nothing with the query. "Godfather" is not in the library; returning
+// His Dark Materials would be worse than returning nothing.
+func TestSearchTieredDropsZeroOverlapNoise(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("show",
+		jsonx.J{"title": "His Dark Materials", "ratingKey": "500", "score": "0.33078"},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp())
+
+	results, _ := library.SearchTiered("Godfather", "")
+
+	if len(results) != 0 {
+		t.Fatalf("results = %v, want none — a hit sharing no token with the query is noise", titles(results))
+	}
+}
+
+// The bug this cost us: "Akira" (a movie) matched a show in the noise band, and
+// play-latest started an Evangelion episode instead of the film.
+func TestSearchTieredDoesNotBindAkiraToEvangelion(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("show",
+		jsonx.J{"title": "Neon Genesis Evangelion", "ratingKey": "1961", "score": "0.33086"},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp())
+
+	if hit := library.ResolveShow("Akira"); hit != nil {
+		t.Fatalf("ResolveShow(Akira) = %#v, want nil — no show in this library is Akira", hit)
+	}
+}
+
+// Prefix tolerance: dictation drops inflections constantly.
+func TestSearchTieredToleratesInflection(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("show",
+		jsonx.J{"title": "The Simpsons", "ratingKey": "20", "score": "0.33"},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp())
+
+	results, _ := library.SearchTiered("Simpson", "show")
+
+	if got := titles(results); len(got) != 1 || got[0] != "The Simpsons" {
+		t.Fatalf("results = %v, want [The Simpsons] — 'Simpson' must reach 'Simpsons'", got)
+	}
+}
+
+// ...but the tolerance must not manufacture matches from stubs.
+func TestSearchTieredPrefixToleranceDoesNotMatchShortStubs(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/hubs/search", hubResp(hub("movie",
+		jsonx.J{"title": "Dennis the Menace", "ratingKey": "77", "score": "0.33"},
+	)))
+	f.onJSON("/hubs/search/voice", hubResp())
+
+	results, _ := library.SearchTiered("Angry Men", "")
+
+	if len(results) != 0 {
+		t.Fatalf("results = %v, want none — 'Men' must not prefix-match 'Menace'", titles(results))
 	}
 }
 
@@ -384,11 +482,11 @@ func TestSearchEmptyResultMarshalsAsJSONArrayNotNull(t *testing.T) {
 // --- resolve_show -------------------------------------------------------------
 
 // A niche show scoring in the weak band must still resolve — that is what the
-// loose tier is for. It just has to be ranked before index 0 is read.
+// loose tier is for. It just has to actually be the thing that was asked for.
 func TestResolveShowWidensToTheWeakBand(t *testing.T) {
 	f := newFakePMS(t)
 	f.onJSON("/hubs/search", hubResp(hub("show",
-		jsonx.J{"title": "NicheShow", "ratingKey": "99", "score": "0.33"},
+		jsonx.J{"title": "Niche Show", "ratingKey": "99", "score": "0.33"},
 	)))
 
 	hit := library.ResolveShow("niche")
