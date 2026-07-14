@@ -211,7 +211,8 @@ Total: 3h 47m
 - Title carries the movie year, or the show name alone — the Detail column holds `movie` or `S0xE0y — Episode Title`.
 - Description: first sentence of `summary`, ≤120 chars, `…` if cut. Omit column if all rows lack summary.
 - Empty result → `Nothing found for "<q>".`
-- Niche show with empty result → silently retry once with `--min-score 0` before reporting empty. **`--min-score` is a `search` flag only** — never append it to `play-latest`, `episodes`, or any non-`search` command. They reject it.
+- **Never pass `--min-score`, and never retry with it.** `search` widens on its own, so an empty result means the title is genuinely not in the library — report it and stop. The old rule here said to retry once with `--min-score 0`; that rule is dead and following it now actively hurts. `--min-score` bypasses the relevance guard, so retrying an empty result hands back whatever unrelated title ranked highest ("Godfather" → *Bring Her Back*). Empty is the honest answer; don't launder it into a wrong one. (It's also `search`-only — `play-latest` and `episodes` reject it.)
+- **`"loose": true` means the hit is plausible but unconfirmed** — a partial title that only half-matched, or a fuzzy recovery from mangled dictation ("blak buks" → Black Books). It is *not* junk: outright noise is dropped, and an absent title returns no matches rather than a loose guess. But don't present it as a clean find — name it and let the user confirm: `Closest I get is <Title> (<year>) — that it?`
 - **`search` caps at ~10 results.** For *whole-show* episode lists (e.g. "show me 30 unwatched"), don't lean on `search` — use `episodes "<show>"` (below), which enumerates the full show. `search` is for finding a title; `episodes` is for listing a show's episodes. Don't curl and don't iteratively mark-watched/restore to enumerate (both still banned).
 
 Debug: append `ratingKey` column.
