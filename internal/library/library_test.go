@@ -556,6 +556,50 @@ func TestEpisodesForShowKeySeasonFilter(t *testing.T) {
 	}
 }
 
+// An episode with no parentIndex is unparented, not a Special. Coercing the
+// absent value to 0 (jsonx.Num's default) files it under season 0, so a
+// --season 0 request sweeps up malformed items the user never asked for — and on
+// set-audio, writes to them. Python compared the raw value, where None != 0.
+func TestEpisodesForShowKeySeasonZeroExcludesUnparentedEpisodes(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/library/metadata/SHOW1/allLeaves", leavesResp(
+		jsonx.J{"ratingKey": "1", "parentIndex": float64(0), "index": float64(1), "title": "Real Special"},
+		jsonx.J{"ratingKey": "2", "index": float64(1), "title": "No parentIndex At All"},
+		jsonx.J{"ratingKey": "3", "parentIndex": nil, "index": float64(2), "title": "Null parentIndex"},
+	))
+
+	season := 0
+	eps := library.EpisodesForShowKey("SHOW1", false, &season)
+
+	if len(eps) != 1 || eps[0]["ratingKey"] != "1" {
+		t.Fatalf("eps = %v, want only the real season-0 special; unparented episodes must not be swept in",
+			titles(eps))
+	}
+}
+
+func TestSeasonOfDistinguishesAbsentFromZero(t *testing.T) {
+	cases := []struct {
+		name   string
+		ep     jsonx.J
+		wantS  int
+		wantOK bool
+	}{
+		{"real season 0", jsonx.J{"parentIndex": float64(0)}, 0, true},
+		{"real season 4", jsonx.J{"parentIndex": float64(4)}, 4, true},
+		{"absent", jsonx.J{}, 0, false},
+		{"null", jsonx.J{"parentIndex": nil}, 0, false},
+		{"non-numeric", jsonx.J{"parentIndex": "1"}, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, ok := library.SeasonOf(tc.ep)
+			if s != tc.wantS || ok != tc.wantOK {
+				t.Fatalf("SeasonOf(%#v) = (%d, %v), want (%d, %v)", tc.ep, s, ok, tc.wantS, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestEpisodesForShowKeyUnwatchedFilter(t *testing.T) {
 	f := newFakePMS(t)
 	f.onJSON("/library/metadata/SHOW1/allLeaves", leavesResp(
