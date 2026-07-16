@@ -201,3 +201,41 @@ func TestSaveSerializesUnderHeldLock(t *testing.T) {
 		t.Fatalf("Save did not persist after lock release: %#v", entry)
 	}
 }
+
+// TestSaveFileModesArePrivate pins W3 (finding 6): the state directory, its
+// lock file, and the state file itself must never be group/world-readable.
+// The config dir does not exist beforehand — t.TempDir() itself is created
+// at 0755, so proving "MkdirAll now creates it private" requires a nested
+// path that MkdirAll actually creates, not one that pre-exists. A
+// pre-existing 0644 state file self-heals to 0600 on its next write —
+// temp+rename replaces the inode, so the new temp file's mode IS the final
+// mode.
+func TestSaveFileModesArePrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cfg")
+	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+
+	if err := queuestate.Save("mid-1", "q1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("config dir mode = %o, err=%v, want 0700", info.Mode().Perm(), err)
+	}
+	statePath := filepath.Join(dir, "queue_state.json")
+	if info, err := os.Stat(statePath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("queue_state.json mode = %o, err=%v, want 0600", info.Mode().Perm(), err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "queue_state.lock")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("queue_state.lock mode = %o, err=%v, want 0600", info.Mode().Perm(), err)
+	}
+
+	if err := os.Chmod(statePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := queuestate.Save("mid-2", "q2", "s2"); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(statePath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("queue_state.json mode after self-heal = %o, err=%v, want 0600", info.Mode().Perm(), err)
+	}
+}

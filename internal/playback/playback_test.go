@@ -683,3 +683,72 @@ func TestPlayMediaMissingServerMachineID(t *testing.T) {
 		t.Fatalf("error = %q", got)
 	}
 }
+
+// TestPlayRefusesRedirect pins W1 (finding 1): a Companion baseurl that 302s
+// must never let X-Plex-Token reach the redirect target, and the resulting
+// error must classify as connection-failed with no query string leaked.
+func TestPlayRefusesRedirect(t *testing.T) {
+	var targetHit bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	result := Play(fakeClient(srv.URL))
+	if jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want failure, got %#v", result)
+	}
+	if targetHit {
+		t.Fatal("redirect target received a request — CheckRedirect did not fire before the request")
+	}
+	errStr, _ := result["error"].(string)
+	if !strings.HasPrefix(errStr, "connection failed:") {
+		t.Fatalf("want 'connection failed:' prefix, got %q", errStr)
+	}
+	if !strings.Contains(errStr, "redirect refused") {
+		t.Fatalf("want 'redirect refused' in message, got %q", errStr)
+	}
+}
+
+// TestCommandIDFileModesArePrivate pins W3 (finding 6): the counter's
+// directory, lock file, and value file must never be group/world-readable.
+// The config dir does not exist beforehand — t.TempDir() itself is created
+// at 0755, so proving "MkdirAll now creates it private" requires a nested
+// path that MkdirAll actually creates, not one that pre-exists. A
+// pre-existing 0644 counter file self-heals to 0600 on its next write —
+// temp+rename replaces the inode, so the new temp file's mode IS the final
+// mode.
+func TestCommandIDFileModesArePrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cfg")
+	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+	t.Cleanup(resetCommandIDState)
+	resetCommandIDState()
+
+	nextCommandID()
+
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("config dir mode = %o, err=%v, want 0700", info.Mode().Perm(), err)
+	}
+	commandIDFile := filepath.Join(dir, "commandid")
+	if info, err := os.Stat(commandIDFile); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("commandid mode = %o, err=%v, want 0600", info.Mode().Perm(), err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "commandid.lock")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("commandid.lock mode = %o, err=%v, want 0600", info.Mode().Perm(), err)
+	}
+
+	if err := os.Chmod(commandIDFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nextCommandID()
+	if info, err := os.Stat(commandIDFile); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("commandid mode after self-heal = %o, err=%v, want 0600", info.Mode().Perm(), err)
+	}
+}

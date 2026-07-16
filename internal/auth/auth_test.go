@@ -67,3 +67,38 @@ func TestMergeConfigPairsEmptyExisting(t *testing.T) {
 		t.Fatalf("pairs = %#v, want %#v", pairs, want)
 	}
 }
+
+// TestValidatePMSURL pins W5 (finding 2, salvaged parts): reject any scheme
+// other than http/https, userinfo, fragments, and query strings before the
+// URL is ever used on the network.
+func TestValidatePMSURL(t *testing.T) {
+	rejects := []string{
+		"ftp://pms.example:32400",             // wrong scheme
+		"http://user:pass@pms.example:32400",  // userinfo
+		"http:///just/a/path",                 // hostless
+		"http://pms.example:32400#fragment",   // fragment
+		"http://pms.example:32400?token=leak", // query string
+		"not a url at all",                    // unparseable / no scheme
+	}
+	for _, raw := range rejects {
+		t.Run("reject "+raw, func(t *testing.T) {
+			if _, err := validatePMSURL(raw); err == nil {
+				t.Fatalf("validatePMSURL(%q) = nil error, want a rejection", raw)
+			}
+		})
+	}
+
+	accepts := []string{
+		"http://pms.example:32400",
+		"https://pms.example:32400",
+		"http://pms.example:32400/",
+		"https://10.0.0.5:32400",
+	}
+	for _, raw := range accepts {
+		t.Run("accept "+raw, func(t *testing.T) {
+			if _, err := validatePMSURL(raw); err != nil {
+				t.Fatalf("validatePMSURL(%q) = %v, want no error", raw, err)
+			}
+		})
+	}
+}

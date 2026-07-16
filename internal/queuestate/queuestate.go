@@ -44,10 +44,10 @@ func lockPath() string {
 // mutator calls withLock exactly once and never nests, so the same-process
 // two-fd flock self-deadlock can't arise.
 func withLock(fn func() error) error {
-	if err := os.MkdirAll(config.Dir(), 0o755); err != nil {
+	if err := os.MkdirAll(config.Dir(), 0o700); err != nil {
 		return fn()
 	}
-	lockFile, err := os.OpenFile(lockPath(), os.O_RDWR|os.O_CREATE, 0o644)
+	lockFile, err := os.OpenFile(lockPath(), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return fn()
 	}
@@ -73,7 +73,7 @@ func readAll() jsonx.J {
 
 func writeAll(state jsonx.J) error {
 	p := path()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(state, "", "  ")
@@ -81,7 +81,7 @@ func writeAll(state jsonx.J) error {
 		return err
 	}
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, p); err != nil {

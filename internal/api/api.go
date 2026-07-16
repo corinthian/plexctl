@@ -136,19 +136,52 @@ func BuildURL(base, path string, params url.Values) string {
 	return u
 }
 
+// NewHTTPClient returns the shared client: bounded timeout, no redirects.
+// Nothing plexctl calls legitimately redirects; following one can forward
+// X-Plex-Token to an arbitrary destination (Go only strips Authorization/
+// Cookie-class headers cross-origin). CheckRedirect fires BEFORE the
+// redirect request is sent, so refusing here means no header ever leaves.
+func NewHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
+	c := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return fmt.Errorf("redirect refused: destination %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
+		},
+	}
+	if transport != nil {
+		c.Transport = transport
+	}
+	return c
+}
+
+// SanitizeError renders err without query strings, userinfo, or fragments.
+// url.Error's rendered form embeds the full request URL; private data rides
+// its query. Keep op, scheme, host, port, and path — the skill routes
+// errors by URL shape (32500 vs 32400 vs plex.tv).
+func SanitizeError(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		if parsed, perr := url.Parse(ue.URL); perr == nil {
+			return ue.Op + " \"" + parsed.Scheme + "://" + parsed.Host + parsed.Path + "\": " + SanitizeError(ue.Err)
+		}
+		return ue.Op + ": " + SanitizeError(ue.Err)
+	}
+	return err.Error()
+}
+
 func classifyTransport(err error) *Error {
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
 		// Before the connection-failed branch: a connect timeout must
 		// classify as a timeout (kind/exit-code contract), mirroring the
 		// ConnectTimeout-subclasses-both ordering note in api.py.
-		return &Error{Message: "request timed out: " + err.Error(), Kind: "timeout"}
+		return &Error{Message: "request timed out: " + SanitizeError(err), Kind: "timeout"}
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		return &Error{Message: "connection failed: " + err.Error(), Kind: "error"}
+		return &Error{Message: "connection failed: " + SanitizeError(err), Kind: "error"}
 	}
-	return &Error{Message: "request failed: " + err.Error(), Kind: "error"}
+	return &Error{Message: "request failed: " + SanitizeError(err), Kind: "error"}
 }
 
 // Request performs an HTTP call against base+path, mirroring api._request.
@@ -168,13 +201,15 @@ func Request(method, base, path string, params url.Values, timeout float64) (any
 	for k, v := range Headers(token, clientID) {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: time.Duration(timeout * float64(time.Second))}
+	client := NewHTTPClient(time.Duration(timeout*float64(time.Second)), nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, classifyTransport(err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	// PMS library responses are legitimately large; 32 MiB just yields a
+	// JSON parse error downstream on truncation, not a sentinel to handle.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return nil, classifyTransport(err)
 	}
@@ -367,5 +402,25 @@ func FormatHTTPError(status int, ctype, body, reason string) string {
 			detail = "no response body"
 		}
 	}
-	return fmt.Sprintf("HTTP %d: %s", status, detail)
+	return fmt.Sprintf("HTTP %d: %s", status, stripControlChars(detail))
+}
+
+// stripControlChars removes ASCII control characters from a remote-supplied
+// string before it reaches a terminal or log — \n and \t become a space
+// (preserving word boundaries) rather than vanishing; everything else below
+// 0x20, plus DEL (0x7F), is dropped outright.
+func stripControlChars(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\t':
+			b.WriteRune(' ')
+		case r < 0x20 || r == 0x7F:
+			// drop
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

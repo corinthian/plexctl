@@ -22,6 +22,10 @@ Writes `~/.config/plexctl/config.toml` (mode 0600) with the server URL, auth tok
 - `$PLEXCTL_CONFIG_DIR` redirects the whole config directory — both `config.toml` and `queue_state.json`.
 - Timeout resolution: `--timeout` > `$PLEXCTL_TIMEOUT` > config `timeout` > 10s.
 
+## Security
+
+HTTP is supported for a PMS URL, but only for a trusted local network — the token is sent unencrypted and `plexctl auth login` warns when you set one. Anything remote must be HTTPS. plexctl never disables certificate verification, and it never follows HTTP redirects (a redirect could otherwise be used to exfiltrate the token to an arbitrary host).
+
 ## Commands
 
 Groups: auth, clients, transport (play/pause/stop/next/prev/seek/volume), search/library/metadata, episodes plus audio/subtitle stream tools, targeted playback (play-latest/play-media/queue), queue control, status (now-playing/continue-watching/history/context), watch state (watched/unwatched/rate), collections, playlists. Run `plexctl --help` or `plexctl <command> --help` for the full reference.

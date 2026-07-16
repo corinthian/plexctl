@@ -83,10 +83,10 @@ func commandIDLockPath() string {
 // (finding 5). Returns ok=false on any filesystem/lock failure, signalling the
 // caller to fall back to the in-memory epoch seed.
 func nextPersistedCommandID(minExclusive int64) (int64, bool) {
-	if err := os.MkdirAll(config.Dir(), 0o755); err != nil {
+	if err := os.MkdirAll(config.Dir(), 0o700); err != nil {
 		return 0, false
 	}
-	lockFile, err := os.OpenFile(commandIDLockPath(), os.O_RDWR|os.O_CREATE, 0o644)
+	lockFile, err := os.OpenFile(commandIDLockPath(), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return 0, false
 	}
@@ -114,7 +114,7 @@ func nextPersistedCommandID(minExclusive int64) (int64, bool) {
 	// partial or empty (mirrors queuestate.writeAll). This is the sole
 	// guarantor of cross-process monotonicity across a crash.
 	tmp := commandIDPath() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(next, 10)), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(next, 10)), 0o600); err != nil {
 		return 0, false
 	}
 	if err := os.Rename(tmp, commandIDPath()); err != nil {
@@ -173,13 +173,15 @@ func companionGet(client jsonx.J, path string, params url.Values) (*http.Respons
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	httpClient := &http.Client{Timeout: time.Duration(api.DefaultTimeout() * float64(time.Second))}
+	httpClient := api.NewHTTPClient(time.Duration(api.DefaultTimeout()*float64(time.Second)), nil)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	// PMS library responses are legitimately large; 32 MiB just yields a
+	// JSON parse error downstream on truncation, not a sentinel to handle.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return resp, nil, err
 	}
@@ -192,13 +194,13 @@ func companionGet(client jsonx.J, path string, params url.Values) (*http.Respons
 func classifyTransportErr(err error) jsonx.J {
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
-		return jsonx.J{"ok": false, "error": "request timed out: " + err.Error()}
+		return jsonx.J{"ok": false, "error": "request timed out: " + api.SanitizeError(err)}
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		return jsonx.J{"ok": false, "error": "connection failed: " + err.Error()}
+		return jsonx.J{"ok": false, "error": "connection failed: " + api.SanitizeError(err)}
 	}
-	return jsonx.J{"ok": false, "error": "request failed: " + err.Error()}
+	return jsonx.J{"ok": false, "error": "request failed: " + api.SanitizeError(err)}
 }
 
 // IsTransportError reports whether an error string carries one of the two

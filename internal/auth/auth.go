@@ -78,17 +78,31 @@ func randomClientIDSuffix() string {
 func classifyAuthTransport(err error) string {
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Op == "dial" {
-		return "connection failed: " + err.Error()
+		return "connection failed: " + api.SanitizeError(err)
 	}
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
-		return "request timed out: " + err.Error()
+		return "request timed out: " + api.SanitizeError(err)
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		return "connection failed: " + err.Error()
+		return "connection failed: " + api.SanitizeError(err)
 	}
-	return "auth request failed: " + err.Error()
+	return "auth request failed: " + api.SanitizeError(err)
+}
+
+// validatePMSURL rejects any scheme other than http/https, userinfo,
+// fragments, and query strings before the URL is ever used on the network
+// — see README Security section. A plain-http scheme is still accepted;
+// the caller decides whether to warn.
+func validatePMSURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.Host == "" || parsed.User != nil ||
+		parsed.Fragment != "" || parsed.RawFragment != "" || parsed.RawQuery != "" {
+		return nil, fmt.Errorf("invalid PMS URL: %s", raw)
+	}
+	return parsed, nil
 }
 
 // readPassword mirrors getpass.getpass: hidden input on a terminal, plain
@@ -129,6 +143,15 @@ func Login() {
 		serverURL = config.Defaults["server_url"]
 	}
 
+	parsedURL, err := validatePMSURL(serverURL)
+	if err != nil {
+		output.Fail(err.Error())
+		return
+	}
+	if parsedURL.Scheme == "http" {
+		fmt.Fprintln(os.Stderr, "Warning: plain-HTTP PMS URL — the token will be sent unencrypted. Use only on a trusted local network.")
+	}
+
 	fmt.Printf("  Default client [%s]: ", config.Defaults["default_client"])
 	defaultClient, _ := reader.ReadString('\n')
 	defaultClient = strings.TrimSpace(defaultClient)
@@ -166,19 +189,19 @@ func Login() {
 	// reliably classifies as a dial error ("connection failed", matching
 	// requests.ConnectTimeout ⊂ ConnectionError) rather than racing the
 	// phase-blind Client.Timeout.
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{Timeout: 14 * time.Second}).DialContext,
-		},
-	}
+	client := api.NewHTTPClient(15*time.Second, &http.Transport{
+		DialContext: (&net.Dialer{Timeout: 14 * time.Second}).DialContext,
+	})
 	resp, err := client.Do(req)
 	if err != nil {
 		output.Out(jsonx.J{"ok": false, "error": classifyAuthTransport(err)})
 		return
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	// plex.tv sign-in responses are small; the 32 MiB cap just matches the
+	// PMS/Companion bounded reads, and truncation would surface as a JSON
+	// parse error downstream, not a sentinel to handle.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		output.Out(jsonx.J{"ok": false, "error": classifyAuthTransport(err)})
 		return
@@ -212,17 +235,17 @@ func Login() {
 	// Verify PMS is reachable before writing config
 	verifyReq, err := http.NewRequest(http.MethodGet, strings.TrimRight(serverURL, "/")+"/", nil)
 	if err != nil {
-		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, err.Error()))
+		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, api.SanitizeError(err)))
 		return
 	}
 	for k, v := range headers {
 		verifyReq.Header.Set(k, v)
 	}
 	verifyReq.Header.Set("X-Plex-Token", token)
-	verifyClient := &http.Client{Timeout: 10 * time.Second}
+	verifyClient := api.NewHTTPClient(10*time.Second, nil)
 	verifyResp, err := verifyClient.Do(verifyReq)
 	if err != nil {
-		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, err.Error()))
+		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, api.SanitizeError(err)))
 		return
 	}
 	defer verifyResp.Body.Close()
