@@ -7,10 +7,13 @@
 #           bulk set-audio --dry-run diff vs the deployed binary, one reverted real write)
 # Every mutation is reverted or targets a scratch object created here.
 set -u
+umask 077
 cd "$(dirname "$0")/.."
 GO=./dist/plexctl
 OLD="$HOME/.local/bin/plexctl"
-LOG="${LIVE_GATE_LOG:-/tmp/live_gates.log}"
+# mktemp gives a private (0600), unique, symlink-race-free path. A caller-
+# supplied LIVE_GATE_LOG is created under the caller's own umask instead.
+LOG="${LIVE_GATE_LOG:-$(mktemp "${TMPDIR:-/tmp}/live_gates.XXXXXX")}"
 PASS=0; FAIL=0
 
 say()  { echo "### $*" >> "$LOG"; }
@@ -122,3 +125,4 @@ else
 fi
 
 say "GATES COMPLETE: $PASS passed, $FAIL failed"
+echo "Log: $LOG"
