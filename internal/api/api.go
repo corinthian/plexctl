@@ -27,7 +27,7 @@ import (
 // var, not a const, so build.sh can inject the real value via
 // -ldflags -X — a const can't be overridden that way. This default is
 // what an unadorned `go build` (dev builds, tests) reports.
-var Version = "1.0.2"
+var Version = "1.0.3"
 
 const plexTV = "https://plex.tv"
 
