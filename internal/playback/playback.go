@@ -83,10 +83,10 @@ func commandIDLockPath() string {
 // (finding 5). Returns ok=false on any filesystem/lock failure, signalling the
 // caller to fall back to the in-memory epoch seed.
 func nextPersistedCommandID(minExclusive int64) (int64, bool) {
-	if err := os.MkdirAll(config.Dir(), 0o755); err != nil {
+	if err := os.MkdirAll(config.Dir(), 0o700); err != nil {
 		return 0, false
 	}
-	lockFile, err := os.OpenFile(commandIDLockPath(), os.O_RDWR|os.O_CREATE, 0o644)
+	lockFile, err := os.OpenFile(commandIDLockPath(), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return 0, false
 	}
@@ -114,7 +114,7 @@ func nextPersistedCommandID(minExclusive int64) (int64, bool) {
 	// partial or empty (mirrors queuestate.writeAll). This is the sole
 	// guarantor of cross-process monotonicity across a crash.
 	tmp := commandIDPath() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(next, 10)), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(next, 10)), 0o600); err != nil {
 		return 0, false
 	}
 	if err := os.Rename(tmp, commandIDPath()); err != nil {

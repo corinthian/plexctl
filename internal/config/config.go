@@ -104,9 +104,13 @@ type KV struct {
 // is read unlocked by every command, so a direct in-place write left a
 // window where a concurrent Load could see a truncated or partial file.
 func Save(pairs []KV) error {
-	if err := os.MkdirAll(Dir(), 0o755); err != nil {
+	if err := os.MkdirAll(Dir(), 0o700); err != nil {
 		return err
 	}
+	// MkdirAll won't tighten a pre-existing directory's mode, and Save is
+	// the only token-writing path — this is the one place that needs to
+	// cover the upgrade case from an older, world-readable config dir.
+	_ = os.Chmod(Dir(), 0o700)
 	var b strings.Builder
 	for _, p := range pairs {
 		esc := strings.ReplaceAll(p.V, `\`, `\\`)
