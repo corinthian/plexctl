@@ -192,13 +192,13 @@ func companionGet(client jsonx.J, path string, params url.Values) (*http.Respons
 func classifyTransportErr(err error) jsonx.J {
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
-		return jsonx.J{"ok": false, "error": "request timed out: " + err.Error()}
+		return jsonx.J{"ok": false, "error": "request timed out: " + api.SanitizeError(err)}
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		return jsonx.J{"ok": false, "error": "connection failed: " + err.Error()}
+		return jsonx.J{"ok": false, "error": "connection failed: " + api.SanitizeError(err)}
 	}
-	return jsonx.J{"ok": false, "error": "request failed: " + err.Error()}
+	return jsonx.J{"ok": false, "error": "request failed: " + api.SanitizeError(err)}
 }
 
 // IsTransportError reports whether an error string carries one of the two

@@ -78,17 +78,17 @@ func randomClientIDSuffix() string {
 func classifyAuthTransport(err error) string {
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Op == "dial" {
-		return "connection failed: " + err.Error()
+		return "connection failed: " + api.SanitizeError(err)
 	}
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
-		return "request timed out: " + err.Error()
+		return "request timed out: " + api.SanitizeError(err)
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		return "connection failed: " + err.Error()
+		return "connection failed: " + api.SanitizeError(err)
 	}
-	return "auth request failed: " + err.Error()
+	return "auth request failed: " + api.SanitizeError(err)
 }
 
 // readPassword mirrors getpass.getpass: hidden input on a terminal, plain
@@ -209,7 +209,7 @@ func Login() {
 	// Verify PMS is reachable before writing config
 	verifyReq, err := http.NewRequest(http.MethodGet, strings.TrimRight(serverURL, "/")+"/", nil)
 	if err != nil {
-		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, err.Error()))
+		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, api.SanitizeError(err)))
 		return
 	}
 	for k, v := range headers {
@@ -219,7 +219,7 @@ func Login() {
 	verifyClient := api.NewHTTPClient(10*time.Second, nil)
 	verifyResp, err := verifyClient.Do(verifyReq)
 	if err != nil {
-		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, err.Error()))
+		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, api.SanitizeError(err)))
 		return
 	}
 	defer verifyResp.Body.Close()

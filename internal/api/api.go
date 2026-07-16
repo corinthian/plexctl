@@ -154,19 +154,34 @@ func NewHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Cli
 	return c
 }
 
+// SanitizeError renders err without query strings, userinfo, or fragments.
+// url.Error's rendered form embeds the full request URL; private data rides
+// its query. Keep op, scheme, host, port, and path — the skill routes
+// errors by URL shape (32500 vs 32400 vs plex.tv).
+func SanitizeError(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		if parsed, perr := url.Parse(ue.URL); perr == nil {
+			return ue.Op + " \"" + parsed.Scheme + "://" + parsed.Host + parsed.Path + "\": " + SanitizeError(ue.Err)
+		}
+		return ue.Op + ": " + SanitizeError(ue.Err)
+	}
+	return err.Error()
+}
+
 func classifyTransport(err error) *Error {
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
 		// Before the connection-failed branch: a connect timeout must
 		// classify as a timeout (kind/exit-code contract), mirroring the
 		// ConnectTimeout-subclasses-both ordering note in api.py.
-		return &Error{Message: "request timed out: " + err.Error(), Kind: "timeout"}
+		return &Error{Message: "request timed out: " + SanitizeError(err), Kind: "timeout"}
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		return &Error{Message: "connection failed: " + err.Error(), Kind: "error"}
+		return &Error{Message: "connection failed: " + SanitizeError(err), Kind: "error"}
 	}
-	return &Error{Message: "request failed: " + err.Error(), Kind: "error"}
+	return &Error{Message: "request failed: " + SanitizeError(err), Kind: "error"}
 }
 
 // Request performs an HTTP call against base+path, mirroring api._request.
@@ -385,5 +400,25 @@ func FormatHTTPError(status int, ctype, body, reason string) string {
 			detail = "no response body"
 		}
 	}
-	return fmt.Sprintf("HTTP %d: %s", status, detail)
+	return fmt.Sprintf("HTTP %d: %s", status, stripControlChars(detail))
+}
+
+// stripControlChars removes ASCII control characters from a remote-supplied
+// string before it reaches a terminal or log — \n and \t become a space
+// (preserving word boundaries) rather than vanishing; everything else below
+// 0x20, plus DEL (0x7F), is dropped outright.
+func stripControlChars(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\t':
+			b.WriteRune(' ')
+		case r < 0x20 || r == 0x7F:
+			// drop
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
