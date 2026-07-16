@@ -129,6 +129,17 @@ func Login() {
 		serverURL = config.Defaults["server_url"]
 	}
 
+	parsedURL, err := url.Parse(serverURL)
+	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
+		parsedURL.Host == "" || parsedURL.User != nil ||
+		parsedURL.Fragment != "" || parsedURL.RawFragment != "" || parsedURL.RawQuery != "" {
+		output.Fail(fmt.Sprintf("invalid PMS URL: %s", serverURL))
+		return
+	}
+	if parsedURL.Scheme == "http" {
+		fmt.Fprintln(os.Stderr, "Warning: plain-HTTP PMS URL — the token will be sent unencrypted. Use only on a trusted local network.")
+	}
+
 	fmt.Printf("  Default client [%s]: ", config.Defaults["default_client"])
 	defaultClient, _ := reader.ReadString('\n')
 	defaultClient = strings.TrimSpace(defaultClient)
