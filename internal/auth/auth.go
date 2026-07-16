@@ -166,12 +166,9 @@ func Login() {
 	// reliably classifies as a dial error ("connection failed", matching
 	// requests.ConnectTimeout ⊂ ConnectionError) rather than racing the
 	// phase-blind Client.Timeout.
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{Timeout: 14 * time.Second}).DialContext,
-		},
-	}
+	client := api.NewHTTPClient(15*time.Second, &http.Transport{
+		DialContext: (&net.Dialer{Timeout: 14 * time.Second}).DialContext,
+	})
 	resp, err := client.Do(req)
 	if err != nil {
 		output.Out(jsonx.J{"ok": false, "error": classifyAuthTransport(err)})
@@ -219,7 +216,7 @@ func Login() {
 		verifyReq.Header.Set(k, v)
 	}
 	verifyReq.Header.Set("X-Plex-Token", token)
-	verifyClient := &http.Client{Timeout: 10 * time.Second}
+	verifyClient := api.NewHTTPClient(10*time.Second, nil)
 	verifyResp, err := verifyClient.Do(verifyReq)
 	if err != nil {
 		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, err.Error()))

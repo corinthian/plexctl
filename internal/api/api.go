@@ -136,6 +136,24 @@ func BuildURL(base, path string, params url.Values) string {
 	return u
 }
 
+// NewHTTPClient returns the shared client: bounded timeout, no redirects.
+// Nothing plexctl calls legitimately redirects; following one can forward
+// X-Plex-Token to an arbitrary destination (Go only strips Authorization/
+// Cookie-class headers cross-origin). CheckRedirect fires BEFORE the
+// redirect request is sent, so refusing here means no header ever leaves.
+func NewHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
+	c := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return fmt.Errorf("redirect refused: destination %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
+		},
+	}
+	if transport != nil {
+		c.Transport = transport
+	}
+	return c
+}
+
 func classifyTransport(err error) *Error {
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
@@ -168,7 +186,7 @@ func Request(method, base, path string, params url.Values, timeout float64) (any
 	for k, v := range Headers(token, clientID) {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: time.Duration(timeout * float64(time.Second))}
+	client := NewHTTPClient(time.Duration(timeout*float64(time.Second)), nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, classifyTransport(err)
