@@ -198,8 +198,9 @@ func Login() {
 		return
 	}
 	defer resp.Body.Close()
-	// PMS library responses are legitimately large; 32 MiB just yields a
-	// JSON parse error downstream on truncation, not a sentinel to handle.
+	// plex.tv sign-in responses are small; the 32 MiB cap just matches the
+	// PMS/Companion bounded reads, and truncation would surface as a JSON
+	// parse error downstream, not a sentinel to handle.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		output.Out(jsonx.J{"ok": false, "error": classifyAuthTransport(err)})
