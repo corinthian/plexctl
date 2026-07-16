@@ -91,6 +91,20 @@ func classifyAuthTransport(err error) string {
 	return "auth request failed: " + api.SanitizeError(err)
 }
 
+// validatePMSURL rejects any scheme other than http/https, userinfo,
+// fragments, and query strings before the URL is ever used on the network
+// — see README Security section. A plain-http scheme is still accepted;
+// the caller decides whether to warn.
+func validatePMSURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.Host == "" || parsed.User != nil ||
+		parsed.Fragment != "" || parsed.RawFragment != "" || parsed.RawQuery != "" {
+		return nil, fmt.Errorf("invalid PMS URL: %s", raw)
+	}
+	return parsed, nil
+}
+
 // readPassword mirrors getpass.getpass: hidden input on a terminal, plain
 // line-read fallback (with getpass's stderr warning) when stdin is not a
 // tty — a scripted `printf "user\npass\n..." | plexctl auth login` must
@@ -129,11 +143,9 @@ func Login() {
 		serverURL = config.Defaults["server_url"]
 	}
 
-	parsedURL, err := url.Parse(serverURL)
-	if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") ||
-		parsedURL.Host == "" || parsedURL.User != nil ||
-		parsedURL.Fragment != "" || parsedURL.RawFragment != "" || parsedURL.RawQuery != "" {
-		output.Fail(fmt.Sprintf("invalid PMS URL: %s", serverURL))
+	parsedURL, err := validatePMSURL(serverURL)
+	if err != nil {
+		output.Fail(err.Error())
 		return
 	}
 	if parsedURL.Scheme == "http" {

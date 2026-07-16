@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -229,4 +230,155 @@ func TestDefaultTimeoutClampsNonPositive(t *testing.T) {
 			t.Fatalf("override=-1 resolved to %v, want %v", got, api.DefaultTimeoutSeconds)
 		}
 	})
+}
+
+// TestRequestRefusesRedirect pins W1 (finding 1): a PMS that 302s must never
+// cause the token to be forwarded to the redirect target, and the resulting
+// error must classify as connection-failed with no query string leaked.
+func TestRequestRefusesRedirect(t *testing.T) {
+	var targetHit bool
+	var targetGotToken bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHit = true
+		if r.Header.Get("X-Plex-Token") != "" {
+			targetGotToken = true
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer target.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/elsewhere", http.StatusFound)
+	}))
+	defer srv.Close()
+	testutil.Setup(t, srv.URL)
+
+	_, err := api.TryGet("/x", url.Values{"q": {"SECRETPHRASE"}})
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	if targetHit {
+		t.Fatal("redirect target received a request — CheckRedirect did not fire before the request")
+	}
+	if targetGotToken {
+		t.Fatal("X-Plex-Token reached the redirect target")
+	}
+	apiErr, ok := err.(*api.Error)
+	if !ok {
+		t.Fatalf("want *api.Error, got %T", err)
+	}
+	if !strings.HasPrefix(apiErr.Message, "connection failed:") {
+		t.Fatalf("want 'connection failed:' prefix, got %q", apiErr.Message)
+	}
+	if !strings.Contains(apiErr.Message, "redirect refused") {
+		t.Fatalf("want 'redirect refused' in message, got %q", apiErr.Message)
+	}
+	if strings.Contains(apiErr.Message, "SECRETPHRASE") || strings.Contains(apiErr.Message, "?") {
+		t.Fatalf("query string leaked into error: %q", apiErr.Message)
+	}
+}
+
+// TestSanitizeError table-tests the *url.Error rendering directly, including
+// a nested *url.Error (a redirect refusal wrapped again by the outer Do
+// call) — the recursive case must not bypass sanitization at either layer.
+func TestSanitizeError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "strips query string",
+			err:  &url.Error{Op: "Get", URL: "http://host.example:32400/library?token=SECRET", Err: errors.New("boom")},
+			want: `Get "http://host.example:32400/library": boom`,
+		},
+		{
+			name: "strips userinfo",
+			err:  &url.Error{Op: "Get", URL: "http://user:pass@host.example/path", Err: errors.New("boom")},
+			want: `Get "http://host.example/path": boom`,
+		},
+		{
+			name: "strips fragment",
+			err:  &url.Error{Op: "Get", URL: "http://host.example/path#secret-fragment", Err: errors.New("boom")},
+			want: `Get "http://host.example/path": boom`,
+		},
+		{
+			name: "recurses through a nested url.Error",
+			err: &url.Error{Op: "Get", URL: "http://pms.example:32400/library?token=SECRET", Err: &url.Error{
+				Op: "dial", URL: "http://pms.example:32400/?token=SECRET", Err: errors.New("dial tcp 10.0.0.5:32400: connect: connection refused"),
+			}},
+			want: `Get "http://pms.example:32400/library": dial "http://pms.example:32400/": dial tcp 10.0.0.5:32400: connect: connection refused`,
+		},
+		{
+			name: "unparseable URL drops it entirely, still recurses",
+			err:  &url.Error{Op: "Get", URL: "http://host.example:badport/secret?token=X", Err: errors.New("boom")},
+			want: "Get: boom",
+		},
+		{
+			name: "non-url.Error passes through unchanged",
+			err:  errors.New("plain failure"),
+			want: "plain failure",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := api.SanitizeError(c.err); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestSanitizeErrorHidesQueryOnRealTransportFailures exercises the sanitizer
+// end-to-end through both classification branches with a live query string
+// carrying a distinctive value that must never surface in the error.
+func TestSanitizeErrorHidesQueryOnRealTransportFailures(t *testing.T) {
+	t.Run("connection refused", func(t *testing.T) {
+		testutil.Setup(t, "http://127.0.0.1:1") // nothing listens on port 1
+		api.SetTimeoutOverride(2)
+		t.Cleanup(func() { api.ClearTimeoutOverride() })
+		_, err := api.TryGet("/x", url.Values{"query": {"SECRETPHRASE"}})
+		if err == nil {
+			t.Fatal("want error")
+		}
+		if strings.Contains(err.Error(), "SECRETPHRASE") {
+			t.Fatalf("query leaked: %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "127.0.0.1:1") || !strings.Contains(err.Error(), "/x") {
+			t.Fatalf("host/path should survive: %q", err.Error())
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(2 * time.Second)
+		}))
+		defer srv.Close()
+		testutil.Setup(t, srv.URL)
+		api.SetTimeoutOverride(0.05)
+		t.Cleanup(func() { api.ClearTimeoutOverride() })
+		_, err := api.TryGet("/slow", url.Values{"query": {"SECRETPHRASE"}})
+		if err == nil {
+			t.Fatal("want error")
+		}
+		if strings.Contains(err.Error(), "SECRETPHRASE") {
+			t.Fatalf("query leaked: %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "/slow") {
+			t.Fatalf("path should survive: %q", err.Error())
+		}
+	})
+}
+
+// TestFormatHTTPErrorStripsControlChars pins W2 (finding 4): a remote body
+// is untrusted input; control characters must never reach a terminal or log
+// verbatim. \n and \t become a space; everything else below 0x20, plus DEL,
+// is dropped.
+func TestFormatHTTPErrorStripsControlChars(t *testing.T) {
+	body := "line1\nline2\ttabbed\x01\x7Fend"
+	got := api.FormatHTTPError(502, "", body, "Bad Gateway")
+	want := "HTTP 502: line1 line2 tabbedend"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
 }

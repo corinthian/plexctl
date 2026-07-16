@@ -116,6 +116,31 @@ func TestTryLoadInvalidTOMLReturnsErrorInsteadOfExiting(t *testing.T) {
 	}
 }
 
+// TestSaveTightensDirMode pins W3 (finding 6): Save must both create a
+// fresh config dir private (MkdirAll 0700) and migrate an older,
+// world-readable dir left over from before this fix (explicit Chmod —
+// MkdirAll never tightens a pre-existing directory's mode on its own).
+func TestSaveTightensDirMode(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cfg") // does not exist yet
+	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+	if err := config.Save([]config.KV{{K: "token", V: "tok"}}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(config.Dir()); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("fresh dir mode = %o, err=%v, want 0700", info.Mode().Perm(), err)
+	}
+
+	if err := os.Chmod(config.Dir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save([]config.KV{{K: "token", V: "tok2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(config.Dir()); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("migrated dir mode = %o, err=%v, want 0700 (Save must re-tighten an older 0755 dir)", info.Mode().Perm(), err)
+	}
+}
+
 func TestRequireMissingExitsOne(t *testing.T) {
 	t.Setenv("PLEXCTL_CONFIG_DIR", t.TempDir())
 	out, code := testutil.Capture(t, func() { config.Require("token") })
