@@ -179,7 +179,9 @@ func companionGet(client jsonx.J, path string, params url.Values) (*http.Respons
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	// PMS library responses are legitimately large; 32 MiB just yields a
+	// JSON parse error downstream on truncation, not a sentinel to handle.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return resp, nil, err
 	}
