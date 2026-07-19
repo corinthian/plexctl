@@ -13,6 +13,7 @@ import (
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/playback"
 )
 
@@ -25,6 +26,16 @@ const invalidPlaylistTypeMsg = "playlist_type must be one of ['audio', 'photo', 
 
 const smartRefusal = "smart playlist: contents are query-driven and cannot be edited via " +
 	"the API — edit the smart filter in the Plex app instead"
+
+const smartContainerHint = "edit the smart rule in the Plex app"
+
+// smartContainerErr builds the v2 PLEX_SMART_CONTAINER refusal for
+// playlists (docs/error_model_v2.md §2/§3).
+func smartContainerErr() *output.CLIError {
+	return output.Err(output.CodeSmartContainer, smartRefusal).
+		WithData("kind", "playlist").
+		WithHint(smartContainerHint)
+}
 
 func uriFor(serverID, ratingKey string) string {
 	return fmt.Sprintf("server://%s/com.plexapp.plugins.library/library/metadata/%s", serverID, ratingKey)
@@ -50,7 +61,10 @@ func isSmart(playlistKey string) bool {
 }
 
 // ListAll mirrors playlists.list_all; the error mirrors its ValueError on a
-// bad type (the CLI converts it to the standard envelope). playlistType == ""
+// bad type. Per docs/error_model_v2.md §3, the command layer classifies
+// whatever error comes back here: an *api.Error routes through
+// api.Classify(…, api.TargetPMS); anything else (including this package's
+// own invalid-type error) is a plexctl-internal surprise. playlistType == ""
 // means unfiltered.
 func ListAll(playlistType string) ([]jsonx.J, error) {
 	params := url.Values{}
@@ -107,19 +121,19 @@ func Show(ratingKey string) []jsonx.J {
 // Smart playlists are not supported — they require a search URI and are
 // rarely needed from a voice interface. POSTs the first item, then PUTs each
 // remaining key. On a mid-loop add failure the partial playlist is deleted
-// best-effort and the error dict carries partialPlaylistID /
+// best-effort and the CLIError's Data carries partialPlaylistID /
 // rollbackAttempted: true so the caller can surface what server-side state
 // existed.
-func Create(title, playlistType string, ratingKeys []string) jsonx.J {
+func Create(title, playlistType string, ratingKeys []string) (jsonx.J, *output.CLIError) {
 	if len(ratingKeys) == 0 {
-		return jsonx.J{"ok": false, "error": "create requires at least one ratingKey"}
+		return nil, output.Err(output.CodeBadRequest, "create requires at least one ratingKey")
 	}
 	if !validTypes[playlistType] {
-		return jsonx.J{"ok": false, "error": invalidPlaylistTypeMsg}
+		return nil, output.Err(output.CodeBadRequest, invalidPlaylistTypeMsg)
 	}
 	serverID := playback.GetServerMachineID()
 	if serverID == "" {
-		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
 
 	data := api.Post("/playlists", url.Values{
@@ -130,75 +144,78 @@ func Create(title, playlistType string, ratingKeys []string) jsonx.J {
 	})
 	items := jsonx.MapList(jsonx.GetMap(data, "MediaContainer"), "Metadata")
 	if len(items) == 0 {
-		return jsonx.J{"ok": false, "error": "playlist creation returned no metadata"}
+		return nil, output.Err(output.CodeInternal, "playlist creation returned no metadata")
 	}
 	playlistKey := items[0]["ratingKey"]
 	if !jsonx.Truthy(playlistKey) {
-		return jsonx.J{"ok": false, "error": "playlist creation returned no ratingKey"}
+		return nil, output.Err(output.CodeInternal, "playlist creation returned no ratingKey")
 	}
 	key := jsonx.AsStr(playlistKey)
 
 	for _, rk := range ratingKeys[1:] {
-		r := addItemsInternal(key, []string{rk}, serverID, true)
-		if !jsonx.Truthy(r["ok"]) {
+		_, cliErr := addItemsInternal(key, []string{rk}, serverID, true)
+		if cliErr != nil {
 			_, _ = api.TryDelete(fmt.Sprintf("/playlists/%s", key), nil)
-			r["partialPlaylistID"] = key
-			r["rollbackAttempted"] = true
-			return r
+			cliErr.WithData("partialPlaylistID", key).WithData("rollbackAttempted", true)
+			return nil, cliErr
 		}
 	}
 
-	return jsonx.J{"ok": true, "ratingKey": key, "title": title, "count": len(ratingKeys)}
+	return jsonx.J{"ok": true, "ratingKey": key, "title": title, "count": len(ratingKeys)}, nil
 }
 
 // Delete mirrors playlists.delete. Allowed on smart playlists — deletion is
-// unambiguous.
+// unambiguous. No local failure branch — the underlying api.Delete already
+// exits through the migrated ExitOnError chokepoint on an HTTP failure.
 func Delete(playlistKey string) jsonx.J {
 	api.Delete(fmt.Sprintf("/playlists/%s", playlistKey), nil)
 	return jsonx.J{"ok": true}
 }
 
 // Rename mirrors playlists.rename. Refuses smart playlists.
-func Rename(playlistKey, newTitle string) jsonx.J {
+func Rename(playlistKey, newTitle string) (jsonx.J, *output.CLIError) {
 	if isSmart(playlistKey) {
-		return jsonx.J{"ok": false, "error": smartRefusal}
+		return nil, smartContainerErr()
 	}
 	api.Put(fmt.Sprintf("/playlists/%s", playlistKey), url.Values{"title": {newTitle}})
-	return jsonx.J{"ok": true}
+	return jsonx.J{"ok": true}, nil
 }
 
 // addItemsInternal mirrors playlists.add_items. Per-item api.TryPut (not
-// print-and-exit api.Put) so a transport or HTTP failure mid-loop returns
-// ok:false with the count added so far, instead of killing the process —
-// this is what makes Create's mid-loop rollback below reachable on a real
-// failure, not just a monkeypatched one.
-func addItemsInternal(playlistKey string, ratingKeys []string, serverID string, trustManual bool) jsonx.J {
+// print-and-exit api.Put) so a transport or HTTP failure mid-loop returns a
+// CodeQueuePartial CLIError with the count added so far, instead of killing
+// the process — this is what makes Create's mid-loop rollback above
+// reachable on a real failure, not just a monkeypatched one.
+func addItemsInternal(playlistKey string, ratingKeys []string, serverID string, trustManual bool) (jsonx.J, *output.CLIError) {
 	if len(ratingKeys) == 0 {
-		return jsonx.J{"ok": false, "error": "add requires at least one ratingKey"}
+		return nil, output.Err(output.CodeBadRequest, "add requires at least one ratingKey")
 	}
 	if !trustManual && isSmart(playlistKey) {
-		return jsonx.J{"ok": false, "error": smartRefusal}
+		return nil, smartContainerErr()
 	}
 	sid := serverID
 	if sid == "" {
 		sid = playback.GetServerMachineID()
 	}
 	if sid == "" {
-		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
 	added := 0
 	for _, rk := range ratingKeys {
 		if _, err := api.TryPut(fmt.Sprintf("/playlists/%s/items", playlistKey), url.Values{"uri": {uriFor(sid, rk)}}); err != nil {
-			return jsonx.J{"ok": false, "error": err.Error(), "added": added}
+			return nil, output.Err(output.CodeQueuePartial, err.Error()).
+				WithHint("retry with the remaining items").
+				WithData("added", added).
+				WithData("failedKey", rk)
 		}
 		added++
 	}
-	return jsonx.J{"ok": true, "added": added}
+	return jsonx.J{"ok": true, "added": added}, nil
 }
 
 // AddItems mirrors playlists.add_items (public entry point: no server-id
 // override, no trust of the smart guard).
-func AddItems(playlistKey string, ratingKeys []string) jsonx.J {
+func AddItems(playlistKey string, ratingKeys []string) (jsonx.J, *output.CLIError) {
 	return addItemsInternal(playlistKey, ratingKeys, "", false)
 }
 
@@ -206,20 +223,20 @@ func AddItems(playlistKey string, ratingKeys []string) jsonx.J {
 // by its playlistItemID (the per-playlist mutation handle, distinct from
 // ratingKey; smart playlists yield null playlistItemID). Refuses smart
 // playlists.
-func RemoveItem(playlistKey, playlistItemID string) jsonx.J {
+func RemoveItem(playlistKey, playlistItemID string) (jsonx.J, *output.CLIError) {
 	if isSmart(playlistKey) {
-		return jsonx.J{"ok": false, "error": smartRefusal}
+		return nil, smartContainerErr()
 	}
 	api.Delete(fmt.Sprintf("/playlists/%s/items/%s", playlistKey, playlistItemID), nil)
-	return jsonx.J{"ok": true}
+	return jsonx.J{"ok": true}, nil
 }
 
 // Clear mirrors playlists.clear: remove every item from a playlist. Refuses
 // smart playlists.
-func Clear(playlistKey string) jsonx.J {
+func Clear(playlistKey string) (jsonx.J, *output.CLIError) {
 	if isSmart(playlistKey) {
-		return jsonx.J{"ok": false, "error": smartRefusal}
+		return nil, smartContainerErr()
 	}
 	api.Delete(fmt.Sprintf("/playlists/%s/items", playlistKey), nil)
-	return jsonx.J{"ok": true}
+	return jsonx.J{"ok": true}, nil
 }

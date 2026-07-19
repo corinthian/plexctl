@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
 
+	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/playlists"
@@ -54,7 +56,17 @@ func newPlaylistListCmd() *cobra.Command {
 			}
 			items, err := playlists.ListAll(playlistType)
 			if err != nil {
-				output.Out(jsonx.J{"ok": false, "error": err.Error()})
+				// docs/error_model_v2.md §3: an *api.Error underlying ListAll's
+				// error classifies via the PMS chokepoint; anything else
+				// (today: the package's own invalid-type ValueError analog,
+				// unreachable via this command since choiceError already
+				// gates --type) is a plexctl-internal surprise.
+				var apiErr *api.Error
+				if errors.As(err, &apiErr) {
+					output.FailErr(api.Classify(apiErr, api.TargetPMS))
+				} else {
+					output.FailErr(output.Err(output.CodeInternal, err.Error()))
+				}
 				return nil
 			}
 			output.Out(jsonx.J{"ok": true, "count": len(items), "playlists": items})
@@ -88,7 +100,12 @@ func newPlaylistCreateCmd() *cobra.Command {
 			if !validPlaylistType(playlistType) {
 				return fmt.Errorf("invalid value for '--type': '%s' is not one of 'video', 'audio', 'photo'", playlistType)
 			}
-			output.Out(playlists.Create(args[0], playlistType, args[1:]))
+			result, cliErr := playlists.Create(args[0], playlistType, args[1:])
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
@@ -114,7 +131,12 @@ func newPlaylistRenameCmd() *cobra.Command {
 		Short: "Rename a playlist to NEW_TITLE.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			output.Out(playlists.Rename(args[0], args[1]))
+			result, cliErr := playlists.Rename(args[0], args[1])
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
@@ -126,7 +148,12 @@ func newPlaylistAddCmd() *cobra.Command {
 		Short: "Add one or more RATING_KEYS to the playlist identified by PLAYLIST_KEY.",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			output.Out(playlists.AddItems(args[0], args[1:]))
+			result, cliErr := playlists.AddItems(args[0], args[1:])
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
@@ -138,7 +165,12 @@ func newPlaylistRemoveCmd() *cobra.Command {
 		Short: "Remove ITEM_ID (playlistItemID from `playlist show`) from PLAYLIST_KEY.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			output.Out(playlists.RemoveItem(args[0], args[1]))
+			result, cliErr := playlists.RemoveItem(args[0], args[1])
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
@@ -150,7 +182,12 @@ func newPlaylistClearCmd() *cobra.Command {
 		Short: "Remove every item from PLAYLIST_KEY (playlist itself is preserved).",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			output.Out(playlists.Clear(args[0]))
+			result, cliErr := playlists.Clear(args[0])
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}

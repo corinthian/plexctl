@@ -23,6 +23,7 @@ import (
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/library"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/playback"
 )
 
@@ -32,6 +33,16 @@ var sectionTypeCodes = map[string]int{"movie": 1, "show": 2}
 
 const smartRefusal = "smart collection: contents are query-driven and cannot be edited via " +
 	"the API — edit the smart filter in the Plex app instead"
+
+const smartContainerHint = "edit the smart rule in the Plex app"
+
+// smartContainerErr builds the v2 PLEX_SMART_CONTAINER refusal for
+// collections (docs/error_model_v2.md §2/§3).
+func smartContainerErr() *output.CLIError {
+	return output.Err(output.CodeSmartContainer, smartRefusal).
+		WithData("kind", "collection").
+		WithHint(smartContainerHint)
+}
 
 // isSmart is a best-effort smart-collection check. Returns false on lookup
 // failure so the real mutation surfaces the canonical error rather than this
@@ -208,17 +219,23 @@ func Show(ratingKey string, raw bool) []jsonx.J {
 // Smart collections are not supported. Section type is auto-resolved from
 // library.Sections(); we only know how to map movie + show sections to PMS
 // type codes today.
-func Create(title, sectionID string, ratingKeys []string) jsonx.J {
+//
+// v2 (docs/error_model_v2.md §3): validation failures are BAD_REQUEST, a
+// missing machineIdentifier or a PMS response missing metadata/ratingKey are
+// INTERNAL (plexctl-side surprises, not user error), and a mid-loop add
+// failure carries the addItemsInternal CLIError forward with
+// partialCollectionID/rollbackAttempted stapled into its Data.
+func Create(title, sectionID string, ratingKeys []string) (jsonx.J, *output.CLIError) {
 	if len(ratingKeys) == 0 {
-		return jsonx.J{"ok": false, "error": "create requires at least one ratingKey"}
+		return nil, output.Err(output.CodeBadRequest, "create requires at least one ratingKey")
 	}
 	serverID := playback.GetServerMachineID()
 	if serverID == "" {
-		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
 	typeCode := resolveSectionTypeCode(sectionID)
 	if typeCode == 0 {
-		return jsonx.J{"ok": false, "error": fmt.Sprintf("section %s is not a movie or show section", sectionID)}
+		return nil, output.Err(output.CodeBadRequest, fmt.Sprintf("section %s is not a movie or show section", sectionID))
 	}
 
 	data := api.Post("/library/collections", url.Values{
@@ -230,29 +247,30 @@ func Create(title, sectionID string, ratingKeys []string) jsonx.J {
 	})
 	items := jsonx.MapList(jsonx.GetMap(data, "MediaContainer"), "Metadata")
 	if len(items) == 0 {
-		return jsonx.J{"ok": false, "error": "collection creation returned no metadata"}
+		return nil, output.Err(output.CodeInternal, "collection creation returned no metadata")
 	}
 	collectionKey := items[0]["ratingKey"]
 	if !jsonx.Truthy(collectionKey) {
-		return jsonx.J{"ok": false, "error": "collection creation returned no ratingKey"}
+		return nil, output.Err(output.CodeInternal, "collection creation returned no ratingKey")
 	}
 	key := jsonx.AsStr(collectionKey)
 
 	for _, rk := range ratingKeys[1:] {
-		r := addItemsInternal(key, []string{rk}, serverID, true)
-		if !jsonx.Truthy(r["ok"]) {
+		_, cliErr := addItemsInternal(key, []string{rk}, serverID, true)
+		if cliErr != nil {
 			_, _ = api.TryDelete(fmt.Sprintf("/library/metadata/%s", key), nil)
-			r["partialCollectionID"] = key
-			r["rollbackAttempted"] = true
-			return r
+			cliErr.WithData("partialCollectionID", key).WithData("rollbackAttempted", true)
+			return nil, cliErr
 		}
 	}
 
-	return jsonx.J{"ok": true, "ratingKey": key, "title": title, "count": len(ratingKeys)}
+	return jsonx.J{"ok": true, "ratingKey": key, "title": title, "count": len(ratingKeys)}, nil
 }
 
 // Delete mirrors collections.delete. Collections are metadata items in PMS.
-// Allowed on smart collections — deletion is unambiguous.
+// Allowed on smart collections — deletion is unambiguous. No local failure
+// branch — the underlying api.Delete already exits through the migrated
+// ExitOnError chokepoint on an HTTP failure.
 func Delete(collectionKey string) jsonx.J {
 	api.Delete(fmt.Sprintf("/library/metadata/%s", collectionKey), nil)
 	return jsonx.J{"ok": true}
@@ -260,49 +278,52 @@ func Delete(collectionKey string) jsonx.J {
 
 // Rename mirrors collections.rename. Locks the title so the scanner won't
 // override it. Refuses smart collections — see isSmart for the rationale.
-func Rename(collectionKey, newTitle string) jsonx.J {
+func Rename(collectionKey, newTitle string) (jsonx.J, *output.CLIError) {
 	if isSmart(collectionKey) {
-		return jsonx.J{"ok": false, "error": smartRefusal}
+		return nil, smartContainerErr()
 	}
 	api.Put(fmt.Sprintf("/library/metadata/%s", collectionKey), url.Values{
 		"title.value":  {newTitle},
 		"title.locked": {"1"},
 	})
-	return jsonx.J{"ok": true}
+	return jsonx.J{"ok": true}, nil
 }
 
 // addItemsInternal mirrors collections.add_items. Per-item api.TryPut (not
-// print-and-exit api.Put) so a transport or HTTP failure mid-loop returns
-// ok:false with the count added so far, instead of killing the process —
-// this is what makes Create's mid-loop rollback below reachable on a real
-// failure, not just a monkeypatched one.
-func addItemsInternal(collectionKey string, ratingKeys []string, serverID string, trustManual bool) jsonx.J {
+// print-and-exit api.Put) so a transport or HTTP failure mid-loop returns a
+// CodeQueuePartial CLIError with the count added so far, instead of killing
+// the process — this is what makes Create's mid-loop rollback above
+// reachable on a real failure, not just a monkeypatched one.
+func addItemsInternal(collectionKey string, ratingKeys []string, serverID string, trustManual bool) (jsonx.J, *output.CLIError) {
 	if len(ratingKeys) == 0 {
-		return jsonx.J{"ok": false, "error": "add requires at least one ratingKey"}
+		return nil, output.Err(output.CodeBadRequest, "add requires at least one ratingKey")
 	}
 	if !trustManual && isSmart(collectionKey) {
-		return jsonx.J{"ok": false, "error": smartRefusal}
+		return nil, smartContainerErr()
 	}
 	sid := serverID
 	if sid == "" {
 		sid = playback.GetServerMachineID()
 	}
 	if sid == "" {
-		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
 	added := 0
 	for _, rk := range ratingKeys {
 		if _, err := api.TryPut(fmt.Sprintf("/library/collections/%s/items", collectionKey), url.Values{"uri": {uriFor(sid, rk)}}); err != nil {
-			return jsonx.J{"ok": false, "error": err.Error(), "added": added}
+			return nil, output.Err(output.CodeQueuePartial, err.Error()).
+				WithHint("retry with the remaining items").
+				WithData("added", added).
+				WithData("failedKey", rk)
 		}
 		added++
 	}
-	return jsonx.J{"ok": true, "added": added}
+	return jsonx.J{"ok": true, "added": added}, nil
 }
 
 // AddItems mirrors collections.add_items (public entry point: no server-id
 // override, no trust of the smart guard).
-func AddItems(collectionKey string, ratingKeys []string) jsonx.J {
+func AddItems(collectionKey string, ratingKeys []string) (jsonx.J, *output.CLIError) {
 	return addItemsInternal(collectionKey, ratingKeys, "", false)
 }
 
@@ -312,10 +333,10 @@ func AddItems(collectionKey string, ratingKeys []string) jsonx.J {
 // The OpenAPI 3.1.0 spec (PMS 1.2.0) documents this as PUT, but PMS 1.43
 // returns HTTP 404 on PUT and accepts DELETE — live-verified 2026-05-13
 // against PMS 1.43.0. We use DELETE. Refuses smart collections.
-func RemoveItem(collectionKey, itemRatingKey string) jsonx.J {
+func RemoveItem(collectionKey, itemRatingKey string) (jsonx.J, *output.CLIError) {
 	if isSmart(collectionKey) {
-		return jsonx.J{"ok": false, "error": smartRefusal}
+		return nil, smartContainerErr()
 	}
 	api.Delete(fmt.Sprintf("/library/collections/%s/items/%s", collectionKey, itemRatingKey), nil)
-	return jsonx.J{"ok": true}
+	return jsonx.J{"ok": true}, nil
 }

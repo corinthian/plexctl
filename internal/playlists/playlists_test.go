@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
 
@@ -235,9 +236,9 @@ func TestShowEmptyPlaylistReturnsEmptySlice(t *testing.T) {
 // --- mutations: create ------------------------------------------------------
 
 func TestCreateEmptyKeysRejected(t *testing.T) {
-	got := Create("X", "video", nil)
-	if got["ok"] != false || got["error"] != "create requires at least one ratingKey" {
-		t.Fatalf("got %#v", got)
+	_, err := Create("X", "video", nil)
+	if err == nil || err.Code != output.CodeBadRequest || err.Message != "create requires at least one ratingKey" {
+		t.Fatalf("err = %#v", err)
 	}
 }
 
@@ -253,9 +254,9 @@ const wantSmartRefusal = "smart playlist: contents are query-driven and cannot b
 	"the API — edit the smart filter in the Plex app instead"
 
 func TestCreateInvalidTypeRejected(t *testing.T) {
-	result := Create("X", "smartlist", []string{"100"})
-	if result["ok"] != false || result["error"] != wantInvalidPlaylistTypeMsg {
-		t.Fatalf("got %#v, want error %q", result, wantInvalidPlaylistTypeMsg)
+	_, err := Create("X", "smartlist", []string{"100"})
+	if err == nil || err.Code != output.CodeBadRequest || err.Message != wantInvalidPlaylistTypeMsg {
+		t.Fatalf("err = %#v, want error %q", err, wantInvalidPlaylistTypeMsg)
 	}
 }
 
@@ -264,10 +265,10 @@ func TestCreateNoMetadataReturnsExactError(t *testing.T) {
 	f.onJSON("/", rootResp("MID"))
 	f.onJSON("/playlists", mc()) // POST returns no Metadata items
 
-	result := Create("X", "video", []string{"100"})
+	_, err := Create("X", "video", []string{"100"})
 	want := "playlist creation returned no metadata"
-	if result["ok"] != false || result["error"] != want {
-		t.Fatalf("got %#v, want error %q", result, want)
+	if err == nil || err.Code != output.CodeInternal || err.Message != want {
+		t.Fatalf("err = %#v, want error %q", err, want)
 	}
 }
 
@@ -276,10 +277,10 @@ func TestCreateNoRatingKeyReturnsExactError(t *testing.T) {
 	f.onJSON("/", rootResp("MID"))
 	f.onJSON("/playlists", mc(jsonx.J{"title": "Comfort"})) // item, no ratingKey
 
-	result := Create("X", "video", []string{"100"})
+	_, err := Create("X", "video", []string{"100"})
 	want := "playlist creation returned no ratingKey"
-	if result["ok"] != false || result["error"] != want {
-		t.Fatalf("got %#v, want error %q", result, want)
+	if err == nil || err.Code != output.CodeInternal || err.Message != want {
+		t.Fatalf("err = %#v, want error %q", err, want)
 	}
 }
 
@@ -287,10 +288,10 @@ func TestCreateNoServerIDRejected(t *testing.T) {
 	f := newFakePMS(t)
 	f.onStatus("/", 500)
 
-	result := Create("X", "video", []string{"100"})
+	_, err := Create("X", "video", []string{"100"})
 	want := "could not retrieve server machineIdentifier"
-	if result["ok"] != false || result["error"] != want {
-		t.Fatalf("got %#v", result)
+	if err == nil || err.Code != output.CodeInternal || err.Message != want {
+		t.Fatalf("err = %#v", err)
 	}
 }
 
@@ -299,7 +300,10 @@ func TestCreateSingleKeyPosts(t *testing.T) {
 	f.onJSON("/", rootResp("MID"))
 	f.onJSON("/playlists", mc(jsonx.J{"ratingKey": "888", "title": "Comfort"}))
 
-	result := Create("Comfort", "video", []string{"100"})
+	result, err := Create("Comfort", "video", []string{"100"})
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if result["ok"] != true || result["ratingKey"] != "888" || result["title"] != "Comfort" || result["count"] != 1 {
 		t.Fatalf("got %#v", result)
 	}
@@ -322,7 +326,10 @@ func TestCreateMultipleKeysLoopsAdds(t *testing.T) {
 	f.onJSON("/playlists", mc(jsonx.J{"ratingKey": "888"}))
 	f.onJSON("/playlists/888/items", jsonx.J{})
 
-	result := Create("Comfort", "video", []string{"100", "101", "102"})
+	result, err := Create("Comfort", "video", []string{"100", "101", "102"})
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if result["ok"] != true || result["count"] != 3 {
 		t.Fatalf("got %#v", result)
 	}
@@ -333,10 +340,9 @@ func TestCreateMultipleKeysLoopsAdds(t *testing.T) {
 
 // TestCreateRollsBackOnPartialAddFailure pins W11: the mid-loop add now
 // goes through api.TryPut, so a real HTTP failure on the second item's PUT
-// — not a monkeypatched addItemsFn — reaches the ok:false branch and
-// triggers rollback. Before W11 this was reachable only via the
-// now-removed test-only seam: api.Put print-and-exits, so this exact
-// failure used to kill the test process instead of returning ok:false.
+// — not a monkeypatched addItemsFn — reaches the CodeQueuePartial branch and
+// triggers rollback. v2: the CLIError returned by addItemsInternal is
+// forwarded with partialPlaylistID/rollbackAttempted stapled into Data.
 func TestCreateRollsBackOnPartialAddFailure(t *testing.T) {
 	f := newFakePMS(t)
 	f.onJSON("/", rootResp("MID"))
@@ -344,15 +350,18 @@ func TestCreateRollsBackOnPartialAddFailure(t *testing.T) {
 	f.onStatus("/playlists/888/items", 500)
 	f.onJSON("/playlists/888", jsonx.J{}) // TryDelete target
 
-	result := Create("Comfort", "video", []string{"100", "101"})
-	if result["ok"] != false {
-		t.Fatalf("ok = %#v, want false", result["ok"])
+	_, err := Create("Comfort", "video", []string{"100", "101"})
+	if err == nil {
+		t.Fatal("err = nil, want CodeQueuePartial")
 	}
-	if result["partialPlaylistID"] != "888" {
-		t.Fatalf("partialPlaylistID = %#v, want 888", result["partialPlaylistID"])
+	if err.Code != output.CodeQueuePartial {
+		t.Fatalf("code = %q, want %q", err.Code, output.CodeQueuePartial)
 	}
-	if result["rollbackAttempted"] != true {
-		t.Fatalf("rollbackAttempted = %#v, want true", result["rollbackAttempted"])
+	if err.Data["partialPlaylistID"] != "888" {
+		t.Fatalf("partialPlaylistID = %#v, want 888", err.Data["partialPlaylistID"])
+	}
+	if err.Data["rollbackAttempted"] != true {
+		t.Fatalf("rollbackAttempted = %#v, want true", err.Data["rollbackAttempted"])
 	}
 	if f.methodCallCount("DELETE", "/playlists/888") != 1 {
 		t.Fatal("rollback must DELETE /playlists/888 exactly once")
@@ -371,12 +380,12 @@ func TestCreateRollsBackOnTransportFailure(t *testing.T) {
 	})
 	f.onJSON("/playlists/888", jsonx.J{}) // TryDelete target
 
-	result := Create("Comfort", "video", []string{"100", "101"})
-	if result["ok"] != false {
-		t.Fatalf("ok = %#v, want false", result["ok"])
+	_, err := Create("Comfort", "video", []string{"100", "101"})
+	if err == nil {
+		t.Fatal("err = nil, want CodeQueuePartial")
 	}
-	if result["rollbackAttempted"] != true {
-		t.Fatalf("rollbackAttempted = %#v, want true", result["rollbackAttempted"])
+	if err.Data["rollbackAttempted"] != true {
+		t.Fatalf("rollbackAttempted = %#v, want true", err.Data["rollbackAttempted"])
 	}
 	if f.methodCallCount("DELETE", "/playlists/888") != 1 {
 		t.Fatal("rollback must DELETE /playlists/888 exactly once")
@@ -415,7 +424,10 @@ func TestRenameSendsTitleParam(t *testing.T) {
 		return 200, mc(jsonx.J{"smart": false})
 	})
 
-	got := Rename("888", "Cozy Movies")
+	got, err := Rename("888", "Cozy Movies")
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if got["ok"] != true {
 		t.Fatalf("got %#v", got)
 	}
@@ -432,7 +444,10 @@ func TestAddItemsLoopsPerKey(t *testing.T) {
 	notSmart(f, "888")
 	f.onJSON("/playlists/888/items", jsonx.J{})
 
-	result := AddItems("888", []string{"100", "101"})
+	result, err := AddItems("888", []string{"100", "101"})
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if result["ok"] != true || result["added"] != 2 {
 		t.Fatalf("got %#v", result)
 	}
@@ -442,9 +457,46 @@ func TestAddItemsLoopsPerKey(t *testing.T) {
 }
 
 func TestAddItemsEmptyRejected(t *testing.T) {
-	got := AddItems("888", nil)
-	if got["ok"] != false || got["error"] != "add requires at least one ratingKey" {
-		t.Fatalf("got %#v", got)
+	_, err := AddItems("888", nil)
+	if err == nil || err.Code != output.CodeBadRequest || err.Message != "add requires at least one ratingKey" {
+		t.Fatalf("err = %#v", err)
+	}
+}
+
+// TestAddItemsPartialFailureReportsAddedAndFailedKey pins the v2
+// CodeQueuePartial contract on the public AddItems entry point directly
+// (not via Create's mid-loop rollback, which always adds one item at a
+// time and so never accumulates added > 1): the first PUT succeeds, the
+// second fails, and the CLIError must carry added:1 and the exact key that
+// failed, plus the retry hint.
+func TestAddItemsPartialFailureReportsAddedAndFailedKey(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/", rootResp("MID"))
+	notSmart(f, "888")
+	var calls int
+	f.on("/playlists/888/items", func(r *http.Request) (int, any) {
+		calls++
+		if calls == 1 {
+			return 200, jsonx.J{}
+		}
+		return 500, nil
+	})
+
+	_, err := AddItems("888", []string{"100", "101", "102"})
+	if err == nil {
+		t.Fatal("err = nil, want CodeQueuePartial")
+	}
+	if err.Code != output.CodeQueuePartial {
+		t.Fatalf("code = %q, want %q", err.Code, output.CodeQueuePartial)
+	}
+	if err.Data["added"] != 1 {
+		t.Fatalf("added = %#v, want 1", err.Data["added"])
+	}
+	if err.Data["failedKey"] != "101" {
+		t.Fatalf("failedKey = %#v, want 101", err.Data["failedKey"])
+	}
+	if err.Hint != "retry with the remaining items" {
+		t.Fatalf("hint = %q", err.Hint)
 	}
 }
 
@@ -453,7 +505,10 @@ func TestRemoveItemUsesDeleteByItemID(t *testing.T) {
 	notSmart(f, "888")
 	f.onJSON("/playlists/888/items/5001", jsonx.J{})
 
-	got := RemoveItem("888", "5001")
+	got, err := RemoveItem("888", "5001")
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if got["ok"] != true {
 		t.Fatalf("got %#v", got)
 	}
@@ -467,7 +522,10 @@ func TestClearDeletesItemsEndpoint(t *testing.T) {
 	notSmart(f, "888")
 	f.onJSON("/playlists/888/items", jsonx.J{})
 
-	got := Clear("888")
+	got, err := Clear("888")
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if got["ok"] != true {
 		t.Fatalf("got %#v", got)
 	}
@@ -482,9 +540,15 @@ func TestAddItemsRefusesSmartPlaylist(t *testing.T) {
 	f := newFakePMS(t)
 	asSmart(f, "888")
 
-	result := AddItems("888", []string{"100"})
-	if result["ok"] != false || result["error"] != wantSmartRefusal {
-		t.Fatalf("got %#v", result)
+	_, err := AddItems("888", []string{"100"})
+	if err == nil || err.Code != output.CodeSmartContainer || err.Message != wantSmartRefusal {
+		t.Fatalf("err = %#v", err)
+	}
+	if err.Data["kind"] != "playlist" {
+		t.Fatalf("kind = %#v, want playlist", err.Data["kind"])
+	}
+	if err.Hint != "edit the smart rule in the Plex app" {
+		t.Fatalf("hint = %q", err.Hint)
 	}
 	if f.callCount("/playlists/888/items") != 0 {
 		t.Fatal("no PUT should fire when refused")
@@ -495,9 +559,9 @@ func TestRemoveItemRefusesSmartPlaylist(t *testing.T) {
 	f := newFakePMS(t)
 	asSmart(f, "888")
 
-	result := RemoveItem("888", "5001")
-	if result["ok"] != false || result["error"] != wantSmartRefusal {
-		t.Fatalf("got %#v", result)
+	_, err := RemoveItem("888", "5001")
+	if err == nil || err.Code != output.CodeSmartContainer || err.Message != wantSmartRefusal {
+		t.Fatalf("err = %#v", err)
 	}
 	if f.callCount("/playlists/888/items/5001") != 0 {
 		t.Fatal("no DELETE should fire when refused")
@@ -508,9 +572,9 @@ func TestClearRefusesSmartPlaylist(t *testing.T) {
 	f := newFakePMS(t)
 	asSmart(f, "888")
 
-	result := Clear("888")
-	if result["ok"] != false || result["error"] != wantSmartRefusal {
-		t.Fatalf("got %#v", result)
+	_, err := Clear("888")
+	if err == nil || err.Code != output.CodeSmartContainer || err.Message != wantSmartRefusal {
+		t.Fatalf("err = %#v", err)
 	}
 	if f.callCount("/playlists/888/items") != 0 {
 		t.Fatal("no DELETE should fire when refused")
@@ -521,9 +585,12 @@ func TestRenameRefusesSmartPlaylist(t *testing.T) {
 	f := newFakePMS(t)
 	asSmart(f, "888")
 
-	result := Rename("888", "New")
-	if result["ok"] != false || result["error"] != wantSmartRefusal {
-		t.Fatalf("got %#v", result)
+	_, err := Rename("888", "New")
+	if err == nil || err.Code != output.CodeSmartContainer || err.Message != wantSmartRefusal {
+		t.Fatalf("err = %#v", err)
+	}
+	if err.Data["kind"] != "playlist" {
+		t.Fatalf("kind = %#v, want playlist", err.Data["kind"])
 	}
 	if f.methodCallCount("PUT", "/playlists/888") != 0 {
 		t.Fatal("no PUT should fire when refused")
@@ -550,7 +617,10 @@ func TestCreateLoopSkipsSmartCheck(t *testing.T) {
 	asSmart(f, "888")
 	f.onJSON("/playlists/888/items", jsonx.J{})
 
-	result := Create("Comfort", "video", []string{"100", "101"})
+	result, err := Create("Comfort", "video", []string{"100", "101"})
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if result["ok"] != true {
 		t.Fatalf("got %#v, want ok:true (trustManual must bypass isSmart)", result)
 	}
