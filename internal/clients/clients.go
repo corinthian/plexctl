@@ -143,11 +143,11 @@ func PrintClients() {
 }
 
 func bailAmbiguous(c jsonx.J) jsonx.J {
-	output.Print(jsonx.J{
-		"ok":    false,
-		"error": fmt.Sprintf("ambiguous client name '%s' — multiple active devices share this name; specify by machineIdentifier", jsonx.AsStr(c["name"])),
-	})
-	output.Exit(1)
+	msg := fmt.Sprintf("ambiguous client name '%s' — multiple active devices share this name; specify by machineIdentifier", jsonx.AsStr(c["name"]))
+	matches := []jsonx.J{{"name": c["name"], "machineIdentifier": c["machineIdentifier"]}}
+	output.FailErr(output.Err(output.CodeClientAmbiguous, msg).
+		WithHint("target by machineIdentifier — run: plexctl clients").
+		WithData("matches", matches))
 	return jsonx.J{} // reached only when output.Exit is a test seam
 }
 
@@ -165,8 +165,9 @@ func resolveIn(clientList []jsonx.J, target string) jsonx.J {
 			}
 			active, _ := c["active"].(bool)
 			if !active {
-				output.Print(jsonx.J{"ok": false, "error": fmt.Sprintf("'%s' is registered but not active — open the Plex app", target)})
-				output.Exit(1)
+				output.FailErr(output.Err(output.CodeClientInactive, fmt.Sprintf("'%s' is registered but not active — open the Plex app", target)).
+					WithHint("open (or relaunch) Plex on the device, then retry").
+					WithData("client", target))
 				return jsonx.J{} // reached only when output.Exit is a test seam
 			}
 			return c
@@ -185,15 +186,17 @@ func resolveIn(clientList []jsonx.J, target string) jsonx.J {
 		}
 		active, _ := c["active"].(bool)
 		if !active {
-			output.Print(jsonx.J{"ok": false, "error": fmt.Sprintf("'%s' is registered but not active — open the Plex app", target)})
-			output.Exit(1)
+			output.FailErr(output.Err(output.CodeClientInactive, fmt.Sprintf("'%s' is registered but not active — open the Plex app", target)).
+				WithHint("open (or relaunch) Plex on the device, then retry").
+				WithData("client", target))
 			return jsonx.J{} // reached only when output.Exit is a test seam
 		}
 		return c
 	}
 
-	output.Print(jsonx.J{"ok": false, "error": fmt.Sprintf("client not found: %s", target)})
-	output.Exit(1)
+	output.FailErr(output.Err(output.CodeClientUnknown, fmt.Sprintf("client not found: %s", target)).
+		WithHint("run: plexctl clients").
+		WithData("client", target))
 	return jsonx.J{} // reached only when output.Exit is a test seam
 }
 
