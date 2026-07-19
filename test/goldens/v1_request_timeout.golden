@@ -1,6 +1,0 @@
-{
-  "argv": ["plexctl", "now-playing"],
-  "stdout": "{\"error\":\"request timed out: Get \\\"http://<SERVER>/status/sessions\\\": <TIMEOUT-REASON>\",\"ok\":false}\n",
-  "exit_code": 2,
-  "note": "stdout has two nondeterministic spans normalized before comparing: the fake PMS's ephemeral httptest host:port -> <SERVER>, and Go's client-timeout error's racy leading clause (either 'net/http: request canceled (Client.Timeout exceeded while awaiting headers)' or 'context deadline exceeded (Client.Timeout exceeded while awaiting headers)', observed both across runs of the identical test) -> <TIMEOUT-REASON>. The test applies the same substitutions to captured stdout before comparing."
-}

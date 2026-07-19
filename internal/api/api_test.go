@@ -82,24 +82,29 @@ func TestRequestEmptyBodyIsEmptyMap(t *testing.T) {
 	}
 }
 
-func TestHTTPErrorExitsOne(t *testing.T) {
+func TestHTTP404CodesNotFound(t *testing.T) {
+	// v2 (docs/error_model_v2.md): PMS 404 → PLEX_NOT_FOUND, exit 2,
+	// structured envelope with http_status.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "gone", 404)
 	}))
 	defer srv.Close()
 	testutil.Setup(t, srv.URL)
 	out, code := testutil.Capture(t, func() { api.Get("/nope", nil) })
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
 	}
-	if !strings.Contains(out, `"error":"HTTP 404: gone"`) {
+	if !strings.Contains(out, `"code":"PLEX_NOT_FOUND"`) || !strings.Contains(out, `"http_status":404`) {
 		t.Fatalf("error shape drifted: %q", out)
+	}
+	if !strings.Contains(out, `"message":"HTTP 404: gone"`) {
+		t.Fatalf("message drifted: %q", out)
 	}
 }
 
-func TestTimeoutClassifiesAndExitsTwo(t *testing.T) {
-	// Contract item 10: read timeouts are kind=timeout, message prefix
-	// "request timed out:", exit 2.
+func TestTimeoutClassifiesAndExitsThree(t *testing.T) {
+	// v2: read timeouts → TRANSPORT_TIMEOUT, exit 3 (batch callers retry on
+	// the code, not the exit).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(2 * time.Second)
 	}))
@@ -109,11 +114,11 @@ func TestTimeoutClassifiesAndExitsTwo(t *testing.T) {
 	t.Cleanup(func() { api.ClearTimeoutOverride() })
 
 	out, code := testutil.Capture(t, func() { api.Get("/slow", nil) })
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2", code)
+	if code != 3 {
+		t.Fatalf("exit = %d, want 3", code)
 	}
-	if !strings.Contains(out, `"error":"request timed out:`) {
-		t.Fatalf("timeout prefix drifted: %q", out)
+	if !strings.Contains(out, `"code":"TRANSPORT_TIMEOUT"`) || !strings.Contains(out, `"message":"request timed out:`) {
+		t.Fatalf("timeout classification drifted: %q", out)
 	}
 }
 
@@ -167,7 +172,9 @@ func TestPlexTVGetReturnsListAndPrefix(t *testing.T) {
 	out, code := testutil.Capture(t, func() {
 		api.ExitOnError("GET", srv.URL, "/boom", nil, "plex.tv ")
 	})
-	if code != 1 || !strings.Contains(out, `"error":"plex.tv HTTP 500:`) {
+	// v2: upstream 5xx → PLEX_SERVER_ERROR, exit 2; the "plex.tv " prefix
+	// survives in the human-readable message only.
+	if code != 2 || !strings.Contains(out, `"code":"PLEX_SERVER_ERROR"`) || !strings.Contains(out, `"message":"plex.tv HTTP 500:`) {
 		t.Fatalf("prefix drifted: code=%d out=%q", code, out)
 	}
 }

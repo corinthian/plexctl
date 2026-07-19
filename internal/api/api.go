@@ -232,20 +232,76 @@ func Request(method, base, path string, params url.Values, timeout float64) (any
 	return v, nil
 }
 
-// ExitOnError wraps Request with print-and-exit semantics (api._exit_on_error).
+// Target names which leg of the stack a request went to. Callers declare it
+// statically — the v1 skill had to sniff URLs (32500 vs 32400 vs plex.tv) out
+// of free-text errors to route them; in v2 that classification is done here,
+// at the call that already knows.
+type Target int
+
+const (
+	TargetPMS Target = iota
+	TargetCloud
+	TargetClient
+)
+
+// Classify converts an api.Error into the v2 CLIError per
+// docs/error_model_v2.md §3: transport errors code by target, HTTP statuses
+// by class. The chokepoint for every coded failure that starts as HTTP.
+func Classify(e *Error, target Target) *output.CLIError {
+	if e.Status == 0 {
+		switch target {
+		case TargetCloud:
+			return output.Err(output.CodeCloudUnreachable, e.Message).
+				WithHint("plex.tv is unreachable — the local server is unaffected; retry shortly")
+		case TargetClient:
+			return output.Err(output.CodeClientUnreachable, e.Message).
+				WithHint("wake the device or relaunch Plex on it, then retry")
+		default:
+			if e.Kind == "timeout" {
+				return output.Err(output.CodeTransportTimeout, e.Message).
+					WithHint("retry — on batches, retry only timed-out items")
+			}
+			return output.Err(output.CodeTransportFailed, e.Message)
+		}
+	}
+	switch {
+	case e.Status == 401 || e.Status == 403:
+		return output.Err(output.CodeAuthRequired, e.Message).
+			WithHTTPStatus(e.Status).WithHint("run: plexctl auth login")
+	case e.Status == 404:
+		return output.Err(output.CodeNotFound, e.Message).WithHTTPStatus(e.Status)
+	case e.Status == 400:
+		return output.Err(output.CodeBadRequest, e.Message).WithHTTPStatus(e.Status)
+	case e.Status >= 500:
+		return output.Err(output.CodeServerError, e.Message).WithHTTPStatus(e.Status)
+	default:
+		return output.Err(output.CodeHTTPError, e.Message).WithHTTPStatus(e.Status)
+	}
+}
+
+// AsError normalizes any error to *Error (non-api errors become Kind "error").
+func AsError(err error) *Error {
+	var e *Error
+	if errors.As(err, &e) {
+		return e
+	}
+	return &Error{Message: err.Error(), Kind: "error"}
+}
+
+// ExitOnError wraps Request with print-and-exit semantics (api._exit_on_error),
+// emitting the v2 coded envelope. prefix survives in the human-readable
+// message only; routing rides the code.
 func ExitOnError(method, base, path string, params url.Values, prefix string) any {
 	v, err := Request(method, base, path, params, 0)
 	if err != nil {
-		var e *Error
-		if !errors.As(err, &e) {
-			e = &Error{Message: err.Error(), Kind: "error"}
+		target := TargetPMS
+		if base == plexTV {
+			target = TargetCloud
 		}
-		output.Print(jsonx.J{"ok": false, "error": prefix + e.Message})
-		if e.Kind == "timeout" {
-			output.Exit(2)
-		} else {
-			output.Exit(1)
-		}
+		e := AsError(err)
+		cli := Classify(e, target)
+		cli.Message = prefix + e.Message
+		output.FailErr(cli)
 		return jsonx.J{} // reached only when output.Exit is a test seam
 	}
 	return v

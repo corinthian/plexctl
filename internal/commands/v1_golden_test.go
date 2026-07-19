@@ -171,16 +171,18 @@ func TestV1GoldenAuthMissing(t *testing.T) {
 // variants across otherwise-identical runs of this exact test.
 var timeoutReasonRe = regexp.MustCompile(`(?:net/http: request canceled|context deadline exceeded)(?: \(Client\.Timeout exceeded while awaiting headers\))?`)
 
-// TestV1GoldenRequestTimeout pins the exit-2 request-timeout contract via a
-// plain single-request command (now-playing), isolated from queue's staging
-// side effects. Two parts of the captured stdout are nondeterministic across
+// TestV2GoldenRequestTimeout pins the request-timeout contract via a plain
+// single-request command (now-playing), isolated from queue's staging side
+// effects. MIGRATED to v2 when the api.ExitOnError chokepoint recoded:
+// TRANSPORT_TIMEOUT, exit 3, structured envelope (the v1 fixture lives in git
+// history). Two parts of the captured stdout are nondeterministic across
 // runs and must be normalized (in both the captured output and the stored
 // golden) before an exact-string comparison: the fake server's host:port (a
 // fresh httptest.Server per run) and the timeout error's leading clause (see
 // timeoutReasonRe) — an unnormalized exact match would pass once and then
 // flake.
-func TestV1GoldenRequestTimeout(t *testing.T) {
-	g := loadV1Golden(t, "v1_request_timeout.golden")
+func TestV2GoldenRequestTimeout(t *testing.T) {
+	g := loadV1Golden(t, "v2_request_timeout.golden")
 	f := newFakePMS(t)
 	f.resolvableClient(t)
 	f.on("GET", "/status/sessions", func(r *http.Request) (int, any) {

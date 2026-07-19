@@ -47,6 +47,9 @@ func Out(result jsonx.J) {
 
 // Fail prints the standard error envelope and exits 1 (config/bootstrap
 // failures that are never timeouts).
+//
+// Deprecated: v1 free-text error surface. P2 migrates call sites to FailErr;
+// delete when no callers remain.
 func Fail(msg string) {
 	Print(jsonx.J{"ok": false, "error": msg})
 	Exit(1)
@@ -55,6 +58,10 @@ func Fail(msg string) {
 // Usage prints the standard error envelope and exits 64 (EX_USAGE): a
 // malformed invocation — bad flag value, empty required argument — that a
 // retry can never fix without the caller changing the command.
+//
+// Deprecated: exit 64 dies in v2 — usage errors are BAD_REQUEST at exit 1.
+// P2 migrates call sites to FailErr(Err(CodeBadRequest, …)); delete when no
+// callers remain.
 func Usage(msg string) {
 	Print(jsonx.J{"ok": false, "error": msg})
 	Exit(64)
