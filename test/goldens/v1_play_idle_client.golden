@@ -1,0 +1,5 @@
+{
+  "argv": ["plexctl", "play"],
+  "stdout": "{\"ok\":true}\n",
+  "exit_code": 0
+}

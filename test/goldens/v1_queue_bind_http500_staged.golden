@@ -1,0 +1,5 @@
+{
+  "argv": ["plexctl", "queue", "123"],
+  "stdout": "{\"error\":\"HTTP 500: Internal Server Error\",\"ok\":false,\"playQueueID\":\"555\",\"selectedItemID\":\"999\",\"staged\":true}\n",
+  "exit_code": 1
+}

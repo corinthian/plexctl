@@ -1,0 +1,5 @@
+{
+  "argv": ["plexctl", "search", "zzzyyyxxx-no-match"],
+  "stdout": "{\"note\":\"no matches\",\"ok\":true,\"results\":[]}\n",
+  "exit_code": 0
+}
