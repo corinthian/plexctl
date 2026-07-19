@@ -22,23 +22,18 @@ func TestOutOKExitsZero(t *testing.T) {
 	}
 }
 
-func TestOutErrorExitsOne(t *testing.T) {
-	_, code := testutil.Capture(t, func() {
+func TestOutFalsyOkIsInternalCanary(t *testing.T) {
+	// v2: failures never reach Out — a falsy-ok envelope here is a plexctl
+	// bug and must surface loudly as INTERNAL (exit 4), not silently keep the
+	// v1 free-text contract.
+	out, code := testutil.Capture(t, func() {
 		output.Out(jsonx.J{"ok": false, "error": "connection failed: nope"})
 	})
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
+	if code != output.ExitInternal {
+		t.Fatalf("exit = %d, want %d", code, output.ExitInternal)
 	}
-}
-
-func TestOutTimeoutExitsTwo(t *testing.T) {
-	// The companion layer builds error dicts by hand; _out matches the stable
-	// message prefix to preserve the exit-2 retry contract.
-	_, code := testutil.Capture(t, func() {
-		output.Out(jsonx.J{"ok": false, "error": "request timed out: x"})
-	})
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2", code)
+	if !strings.Contains(out, `"code":"INTERNAL"`) || !strings.Contains(out, "uncoded failure envelope") {
+		t.Fatalf("canary envelope drifted: %q", out)
 	}
 }
 

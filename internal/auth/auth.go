@@ -149,15 +149,13 @@ func Login() {
 		"X-Plex-Client-Identifier": clientID,
 	}
 
-	// TODO(P2): docs/error_model_v2.md §3's auth.go mapping doesn't name
-	// this site (only "the two classifyAuthTransport Out sites" — the
-	// client.Do and body-read failures below). Left on the v1 output.Fail
-	// path deliberately rather than inventing a code; by analogy with the
-	// PMS-verify request-build site it would become
-	// api.Classify(api.AsError(err), api.TargetCloud) then output.FailErr.
+	// Request-build failure (effectively unreachable) classifies like the
+	// PMS-verify build site: cloud target, transport class.
 	req, err := http.NewRequest(http.MethodPost, plexTVSignIn, nil)
 	if err != nil {
-		output.Fail("auth request failed: " + err.Error())
+		e := api.AsError(err)
+		e.Message = "auth request failed: " + e.Message
+		output.FailErr(api.Classify(e, api.TargetCloud))
 		return
 	}
 	req.SetBasicAuth(username, password)

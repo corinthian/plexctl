@@ -211,17 +211,6 @@ func classifyTransportErr(err error) *api.Error {
 	return &api.Error{Message: "request failed: " + api.SanitizeError(err), Kind: "error"}
 }
 
-// IsTransportError reports whether an error string carries one of the two
-// transport-shaped prefixes classifyTransportErr produces when the client
-// itself didn't answer (timed out or refused), as opposed to an HTTP status
-// error from a reachable client. Callers use it to set clientUnreachable only
-// when the device is genuinely unreachable — never for a 4xx/5xx bind. Still
-// valid post-v2: playerCmdJ's adapter preserves these exact prefixes in
-// cliErr.Message for legacy jsonx.J callers (PlayMedia/PlayQueue).
-func IsTransportError(errStr string) bool {
-	return strings.HasPrefix(errStr, "request timed out") || strings.HasPrefix(errStr, "connection failed")
-}
-
 // playerCmd mirrors _player_cmd: fire-and-report Companion command. v2
 // (docs/error_model_v2.md §3, transport.go row): a transport-shaped failure
 // classifies via api.Classify(_, api.TargetClient) — CodeClientUnreachable,
@@ -246,22 +235,6 @@ func playerCmd(client jsonx.J, path string, extra map[string]string) (jsonx.J, *
 		return nil, output.Err(output.CodeHTTPError, msg).WithHTTPStatus(resp.StatusCode)
 	}
 	return jsonx.J{"ok": true}, nil
-}
-
-// playerCmdJ adapts playerCmd's v2 (jsonx.J, *output.CLIError) return to the
-// legacy {"ok":false,"error":...} shape for callers this migration leaves
-// untouched: PlayMedia/PlayQueue, whose callers (internal/queue,
-// internal/commands/library.go, internal/commands/playmedia.go) are out of
-// scope here. cliErr.Message keeps the same "request timed out:"/"connection
-// failed:"/"request failed:"/"HTTP <nnn>:" text playerCmd always produced, so
-// IsTransportError and every existing PlayMedia/PlayQueue caller/test see
-// unchanged behavior.
-func playerCmdJ(client jsonx.J, path string, extra map[string]string) jsonx.J {
-	result, cliErr := playerCmd(client, path, extra)
-	if cliErr != nil {
-		return jsonx.J{"ok": false, "error": cliErr.Message}
-	}
-	return result
 }
 
 // PlayerGet mirrors playback._player_get: GET from the client's Companion
@@ -552,10 +525,10 @@ func hostPort(serverURL string) (string, int) {
 // useful for display but must never reach a request parameter — a
 // Python-era queue_state.json with a null selectedItemID can still reach
 // this call via the saved/staged Start path).
-func PlayQueue(client jsonx.J, queueID, selectedItemID string) jsonx.J {
+func PlayQueue(client jsonx.J, queueID, selectedItemID string) (jsonx.J, *output.CLIError) {
 	serverID := GetServerMachineID()
 	if serverID == "" {
-		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
 	cfg := config.Load()
 	serverURL := config.StringOr(cfg, "server_url", config.Defaults["server_url"])
@@ -571,20 +544,20 @@ func PlayQueue(client jsonx.J, queueID, selectedItemID string) jsonx.J {
 	if selectedItemID != "" && selectedItemID != "None" {
 		params["playQueueSelectedItemID"] = selectedItemID
 	}
-	return playerCmdJ(client, "/player/playback/playMedia", params)
+	return playerCmd(client, "/player/playback/playMedia", params)
 }
 
 // PlayMedia mirrors playback.play_media.
-func PlayMedia(client jsonx.J, ratingKey string) jsonx.J {
+func PlayMedia(client jsonx.J, ratingKey string) (jsonx.J, *output.CLIError) {
 	serverID := GetServerMachineID()
 	if serverID == "" {
-		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
 	cfg := config.Load()
 	serverURL := config.StringOr(cfg, "server_url", config.Defaults["server_url"])
 	address, port := hostPort(serverURL)
 	key := "/library/metadata/" + ratingKey
-	return playerCmdJ(client, "/player/playback/playMedia", map[string]string{
+	return playerCmd(client, "/player/playback/playMedia", map[string]string{
 		"key":               key,
 		"machineIdentifier": serverID,
 		"address":           address,

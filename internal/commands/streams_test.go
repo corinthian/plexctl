@@ -87,15 +87,11 @@ func TestSetAudioSetSubtitleGuardStrings(t *testing.T) {
 	}
 }
 
-// TestSetAudioSingleItemLanguageStreamIDGuardStaysLegacy pins the one
-// hand-rolled flag-validation site (set-audio single-item, RATING_KEY given)
-// that docs/error_model_v2.md §3's migration mapping does NOT name among its
-// six streams.go BAD_REQUEST sites, despite being message-identical to the
-// set-subtitle sibling that IS migrated above. Left on the pre-v2
-// {"ok":false,"error":"..."} shape per the explicit "six" in the mapping —
-// exit code is unaffected (still 1) either way. See the P2-D report for the
-// flagged discrepancy.
-func TestSetAudioSingleItemLanguageStreamIDGuardStaysLegacy(t *testing.T) {
+// TestSetAudioSingleItemLanguageStreamIDGuardBadRequest — the seventh
+// flag-validation site (set-audio single-item), migrated in the post-P2
+// sweep: the inventory's "six" was an undercount, this guard is
+// message-identical to the set-subtitle sibling and codes the same way.
+func TestSetAudioSingleItemLanguageStreamIDGuardBadRequest(t *testing.T) {
 	_ = newFakePMS(t)
 	root := commands.BuildRoot()
 	root.SetArgs([]string{"set-audio", "123", "--language", "eng", "--stream-id", "5"})
@@ -104,9 +100,10 @@ func TestSetAudioSingleItemLanguageStreamIDGuardStaysLegacy(t *testing.T) {
 		t.Fatalf("exit = %d, want 1; out=%s", code, out)
 	}
 	got := mustUnmarshal(t, out)
-	want := "--language and --stream-id are mutually exclusive"
-	if got["ok"] != false || got["error"] != want {
-		t.Fatalf("got %#v, want legacy flat error=%q", got, want)
+	errObj, _ := got["error"].(map[string]any)
+	if got["ok"] != false || errObj == nil || errObj["code"] != "BAD_REQUEST" ||
+		errObj["message"] != "--language and --stream-id are mutually exclusive" {
+		t.Fatalf("got %#v, want BAD_REQUEST envelope", got)
 	}
 }
 

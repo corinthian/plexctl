@@ -312,8 +312,11 @@ func Stage(client jsonx.J, queueID, selectedID string) StageOutcome {
 // Per docs/error_model_v2.md §5 precedence, this is always CONFLICT or
 // STAGED — never a bare CLIENT_UNREACHABLE, which instead rides in
 // data.clientUnreachable.
-func StageBindFailure(client jsonx.J, bindErr, queueID, selectedID string) *output.CLIError {
-	unreachable := playback.IsTransportError(bindErr)
+func StageBindFailure(client jsonx.J, bindErr *output.CLIError, queueID, selectedID string) *output.CLIError {
+	// The typed bind error makes unreachability a code check, not a
+	// message-prefix sniff: CodeClientUnreachable is the device-didn't-answer
+	// class; anything else (CodeHTTPError etc.) means reachable-but-rejected.
+	unreachable := bindErr.Code == output.CodeClientUnreachable
 	outcome := Stage(client, queueID, selectedID)
 	switch {
 	case outcome.WriteErr != nil:
@@ -321,16 +324,16 @@ func StageBindFailure(client jsonx.J, bindErr, queueID, selectedID string) *outp
 		// plexctl-side problem. Not STAGED (nothing persisted) and not
 		// CONFLICT (SaveIfAbsent found no prior entry to preserve) — see
 		// internalStateErr's doc comment.
-		return internalStateErr("bind failed ("+bindErr+") and additionally failed to stage queue state", outcome.WriteErr).
+		return internalStateErr("bind failed ("+bindErr.Message+") and additionally failed to stage queue state", outcome.WriteErr).
 			WithData("playQueueID", queueID).WithData("selectedItemID", selectedID).
 			WithData("clientUnreachable", unreachable)
 	case outcome.Staged:
-		return output.Err(output.CodeQueueStaged, "queue created but the client did not confirm playback ("+bindErr+")").
+		return output.Err(output.CodeQueueStaged, "queue created but the client did not confirm playback ("+bindErr.Message+")").
 			WithHint("run: plexctl queue-start once the client is awake — do NOT re-run queue").
 			WithData("playQueueID", queueID).WithData("selectedItemID", selectedID).
 			WithData("staged", true).WithData("clientUnreachable", unreachable)
 	default:
-		return output.Err(output.CodeQueueConflict, "queue created but could not be staged — a previous queue is still the active record ("+bindErr+")").
+		return output.Err(output.CodeQueueConflict, "queue created but could not be staged — a previous queue is still the active record ("+bindErr.Message+")").
 			WithHint("re-run the queue command once the client is back — queue-start would start the OLD queue").
 			WithData("activeQueueID", outcome.ActiveQueueID).WithData("orphanedQueueID", queueID).
 			WithData("clientUnreachable", unreachable)
@@ -356,11 +359,9 @@ func Start(client jsonx.J) (jsonx.J, *output.CLIError) {
 	if jsonx.Truthy(entry["selectedItemID"]) {
 		selectedItemID = jsonx.AsStr(entry["selectedItemID"])
 	}
-	bind := playback.PlayQueue(client, queueID, selectedItemID)
-	if !jsonx.Truthy(bind["ok"]) {
-		errStr, _ := bind["error"].(string)
-		unreachable := playback.IsTransportError(errStr)
-		return nil, output.Err(output.CodeQueueStaged, "queue-start bind failed ("+errStr+")").
+	if _, bindErr := playback.PlayQueue(client, queueID, selectedItemID); bindErr != nil {
+		unreachable := bindErr.Code == output.CodeClientUnreachable
+		return nil, output.Err(output.CodeQueueStaged, "queue-start bind failed ("+bindErr.Message+")").
 			WithHint("run: plexctl queue-start once the client is awake — do NOT re-run queue").
 			WithData("playQueueID", queueID).WithData("selectedItemID", selectedItemID).
 			WithData("staged", true).WithData("clientUnreachable", unreachable)

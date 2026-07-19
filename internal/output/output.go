@@ -1,11 +1,11 @@
 // Package output owns the stdout JSON contract and exit-code discipline.
-// Every path through this package writes exactly one line of JSON to stdout
-// and exits 0 on success, 1 on failure, 2 on request timeout, 64 on a usage
-// or validation error. NDJSON commands emit many lines by design — one per
-// row plus a summary — which is not an exception to "one line," just a
-// caller that calls Print repeatedly. The one deliberate exception is
-// cobra's own --help/--version handling, which bypasses this package
-// entirely and prints non-JSON text at exit 0.
+// Every path through this package writes exactly one line of JSON to stdout;
+// failures carry a code from the closed enumeration in errors.go, with the
+// exit class (0–6, see docs/error_model_v2.md) derived from the code. NDJSON
+// commands emit many lines by design — one per row plus a summary — which is
+// not an exception to "one line," just a caller that calls Print repeatedly.
+// The one deliberate exception is cobra's own --help/--version handling,
+// which bypasses this package entirely and prints non-JSON text at exit 0.
 package output
 
 import (
@@ -13,7 +13,6 @@ import (
 	"io"
 	"iter"
 	"os"
-	"strings"
 
 	"github.com/corinthian/plexctl/internal/jsonx"
 )
@@ -30,41 +29,17 @@ func Print(result jsonx.J) {
 	fmt.Fprintln(Stdout, jsonx.Marshal(result))
 }
 
-// Out mirrors cli._out: print the result, then exit 1 on falsy "ok", or 2
-// when the error carries the stable timeout prefix (batch callers retry
-// exit-2 items only).
+// Out emits a success result. Failures never come here in v2 — they go
+// through FailErr with a coded CLIError. The falsy-ok branch is a canary:
+// any straggler still emitting a v1 free-text failure envelope surfaces
+// loudly as an INTERNAL bug instead of silently keeping the old contract.
 func Out(result jsonx.J) {
-	Print(result)
 	if !jsonx.Truthy(result["ok"]) {
 		errStr, _ := result["error"].(string)
-		if strings.HasPrefix(errStr, "request timed out") {
-			Exit(2)
-		} else {
-			Exit(1)
-		}
+		FailErr(Err(CodeInternal, "uncoded failure envelope reached output.Out — plexctl bug: "+errStr))
+		return
 	}
-}
-
-// Fail prints the standard error envelope and exits 1 (config/bootstrap
-// failures that are never timeouts).
-//
-// Deprecated: v1 free-text error surface. P2 migrates call sites to FailErr;
-// delete when no callers remain.
-func Fail(msg string) {
-	Print(jsonx.J{"ok": false, "error": msg})
-	Exit(1)
-}
-
-// Usage prints the standard error envelope and exits 64 (EX_USAGE): a
-// malformed invocation — bad flag value, empty required argument — that a
-// retry can never fix without the caller changing the command.
-//
-// Deprecated: exit 64 dies in v2 — usage errors are BAD_REQUEST at exit 1.
-// P2 migrates call sites to FailErr(Err(CodeBadRequest, …)); delete when no
-// callers remain.
-func Usage(msg string) {
-	Print(jsonx.J{"ok": false, "error": msg})
-	Exit(64)
+	Print(result)
 }
 
 // EmitNDJSON mirrors cli._emit_ndjson: one JSON object per row as produced

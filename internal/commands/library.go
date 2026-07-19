@@ -215,16 +215,18 @@ Use --key-only to resolve the ratingKey without starting playback.`,
 				return nil
 			}
 			target := clients.Resolve(client)
-			result := playback.PlayMedia(target, jsonx.AsStr(item["ratingKey"]))
-			if jsonx.Truthy(result["ok"]) {
-				result["playing"] = jsonx.J{
-					"title":     item["title"],
-					"type":      item["type"],
-					"season":    item["parentIndex"],
-					"episode":   item["index"],
-					"year":      item["year"],
-					"ratingKey": item["ratingKey"],
-				}
+			result, cliErr := playback.PlayMedia(target, jsonx.AsStr(item["ratingKey"]))
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			result["playing"] = jsonx.J{
+				"title":     item["title"],
+				"type":      item["type"],
+				"season":    item["parentIndex"],
+				"episode":   item["index"],
+				"year":      item["year"],
+				"ratingKey": item["ratingKey"],
 			}
 			output.Out(result)
 			return nil

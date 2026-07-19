@@ -67,13 +67,11 @@ func newQueueCmd() *cobra.Command {
 		}
 		queueID := jsonx.AsStr(q["playQueueID"])
 		selectedID := jsonx.AsStr(q["selectedItemID"])
-		bind := playback.PlayQueue(target, queueID, selectedID)
-		if !jsonx.Truthy(bind["ok"]) {
+		if _, bindErr := playback.PlayQueue(target, queueID, selectedID); bindErr != nil {
 			// The queue exists on the server the moment Create succeeded.
 			// StageBindFailure surfaces its IDs (in data) so a bind failure
 			// leaves a queue the caller can see and recover, not an orphan —
 			// resolved into CONFLICT vs STAGED per docs/error_model_v2.md §5.
-			bindErr, _ := bind["error"].(string)
 			output.FailErr(queue.StageBindFailure(target, bindErr, queueID, selectedID))
 			return nil
 		}

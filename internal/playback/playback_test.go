@@ -844,9 +844,9 @@ func TestPlayMediaAddressPortAndKeyShape(t *testing.T) {
 	pms := newFakePMS(t, nil, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := PlayMedia(fakeClient(csrv.URL), "12345")
-	if !jsonx.Truthy(result["ok"]) {
-		t.Fatalf("want ok, got %#v", result)
+	result, cliErr := PlayMedia(fakeClient(csrv.URL), "12345")
+	if cliErr != nil || !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v (err %v)", result, cliErr)
 	}
 	call := fc.last()
 	pmsURL, _ := url.Parse(pms.URL)
@@ -878,9 +878,9 @@ func TestPlayQueueKeyShapeAndParams(t *testing.T) {
 	pms := newFakePMS(t, nil, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := PlayQueue(fakeClient(csrv.URL), "5535", "42687")
-	if !jsonx.Truthy(result["ok"]) {
-		t.Fatalf("want ok, got %#v", result)
+	result, cliErr := PlayQueue(fakeClient(csrv.URL), "5535", "42687")
+	if cliErr != nil || !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v (err %v)", result, cliErr)
 	}
 	call := fc.last()
 	if got := call.query.Get("key"); got != "/playQueues/5535" {
@@ -902,9 +902,9 @@ func TestPlayQueueMissingServerMachineID(t *testing.T) {
 	pms := newFakePMS(t, nil, "") // "/" carries no machineIdentifier
 	testutil.Setup(t, pms.URL)
 
-	result := PlayQueue(fakeClient(csrv.URL), "5535", "42687")
-	if got := result["error"]; got != "could not retrieve server machineIdentifier" {
-		t.Fatalf("error = %q", got)
+	_, cliErr := PlayQueue(fakeClient(csrv.URL), "5535", "42687")
+	if cliErr == nil || cliErr.Code != output.CodeInternal || cliErr.Message != "could not retrieve server machineIdentifier" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 }
 
@@ -913,9 +913,9 @@ func TestPlayMediaMissingServerMachineID(t *testing.T) {
 	pms := newFakePMS(t, nil, "")
 	testutil.Setup(t, pms.URL)
 
-	result := PlayMedia(fakeClient(csrv.URL), "12345")
-	if got := result["error"]; got != "could not retrieve server machineIdentifier" {
-		t.Fatalf("error = %q", got)
+	_, cliErr := PlayMedia(fakeClient(csrv.URL), "12345")
+	if cliErr == nil || cliErr.Code != output.CodeInternal || cliErr.Message != "could not retrieve server machineIdentifier" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 }
 

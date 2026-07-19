@@ -22,7 +22,12 @@ func newPlayMediaCmd() *cobra.Command {
 	}
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		output.Out(playback.PlayMedia(clients.Resolve(*client), args[0]))
+		result, cliErr := playback.PlayMedia(clients.Resolve(*client), args[0])
+		if cliErr != nil {
+			output.FailErr(cliErr)
+			return nil
+		}
+		output.Out(result)
 		return nil
 	}
 	return cmd

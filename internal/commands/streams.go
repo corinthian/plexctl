@@ -156,21 +156,8 @@ Single: --language (default eng) xor --stream-id. Bulk: --language, optional
 			}
 
 			// single-item
-			//
-			// NOTE (P2-D scope note): unlike its five siblings above and its
-			// set-subtitle twin below, this guard is deliberately left on the
-			// legacy output.Out([...]) shape. docs/error_inventory.md's
-			// streams.go note names exactly six hand-rolled flag-validation
-			// sites as "wrongly exit 1" (3,4,5,6,11,12 in its table) — this
-			// site is table row 8, identical in kind and message pattern to
-			// row 12 (set-subtitle's --language/--stream-id guard) but is not
-			// among the six named in docs/error_model_v2.md §3's migration
-			// mapping. Exit code is unaffected either way (Out's falsy branch
-			// already exits 1, same as BAD_REQUEST would). Flagged in the P2-D
-			// report as a gap worth confirming rather than migrated on
-			// judgment call.
 			if languageSet && streamIDSet {
-				output.Out(jsonx.J{"ok": false, "error": "--language and --stream-id are mutually exclusive"})
+				output.FailErr(output.Err(output.CodeBadRequest, "--language and --stream-id are mutually exclusive"))
 				return nil
 			}
 			if streamIDSet {
