@@ -30,10 +30,19 @@ func BuildRoot() *cobra.Command {
 		Short:   "Plex Media Server control CLI — output is JSON, designed for LLM consumption.",
 		Long: `Plex Media Server control CLI — output is JSON, designed for LLM consumption.
 
-All commands emit a JSON object with an "ok" boolean. On failure, "error"
-contains a human-readable message. Exit code is 0 on success, 1 on a domain
-failure, 2 when the failure was a request timeout, 64 on a usage or
-validation error (malformed invocation — never retry, fix the command).`,
+All commands emit a JSON object with an "ok" boolean. On failure, the
+envelope is {"ok": false, "error": {"code", "message", "http_status"?,
+"hint"?}, "data"?} — "code" is a stable member of a closed enumeration
+(never match on "message", which is free-text and unstable).
+
+Exit codes: 0 success, 1 bad invocation (malformed command/flags/args —
+never retry, fix the command), 2 Plex refused or errored the request,
+3 transport failure (timeout, connection failure, unreachable client or
+cloud), 4 internal plexctl bug, 5 not authenticated, 6 accepted but not
+applied (upstream reported success but verification found nothing changed).
+
+Run "plexctl commands" for a machine-readable JSON listing of every command
+in this tree.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
@@ -61,10 +70,10 @@ validation error (malformed invocation — never retry, fix the command).`,
 // error — cobra's own arg-count/unknown-flag rejections, and every
 // hand-rolled validator (choiceError, rate/volume/history-limit range
 // checks) that returns an error instead of calling output directly — all
-// exit 64 through output.Usage. Domain failures exit via output.Out's 1/2
-// discipline before cobra ever sees an error.
+// become BAD_REQUEST at exit 1 (v2: exit 64 is dead). Domain failures exit
+// via output.FailErr's coded discipline before cobra ever sees an error.
 func Execute() {
 	if err := BuildRoot().Execute(); err != nil {
-		output.Usage(err.Error())
+		output.FailErr(output.Err(output.CodeBadRequest, err.Error()))
 	}
 }

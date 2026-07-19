@@ -79,3 +79,39 @@ func TestContextIncludesHistoryByDefault(t *testing.T) {
 		t.Fatalf("expected history key present by default: %#v", got)
 	}
 }
+
+// TestContextNowPlayingFailureFlipsTopLevelOkAndExitsPlexClass pins the v2
+// aggregate contract: a failed now-playing fetch (classified PLEX_SERVER_ERROR
+// off a PMS HTTP 500) both flips the top-level "ok" to false and drives the
+// process exit to that code's class (2 — Plex refused/errored), replacing
+// v1's now-playing-only inconsistency (docs/error_model_v2.md §3).
+func TestContextNowPlayingFailureFlipsTopLevelOkAndExitsPlexClass(t *testing.T) {
+	f := newFakePMS(t)
+	f.resolvableClient(t)
+	f.onStatus("GET", "/status/sessions", 500)
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"context", "--no-history"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (PLEX_SERVER_ERROR's exit class); out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != false {
+		t.Fatalf("top-level ok = %#v, want false; out=%s", got["ok"], out)
+	}
+	np, ok := got["nowPlaying"].(map[string]any)
+	if !ok {
+		t.Fatalf("nowPlaying = %#v, want an object; out=%s", got["nowPlaying"], out)
+	}
+	if np["ok"] != false {
+		t.Fatalf("nowPlaying.ok = %#v, want false; out=%s", np["ok"], out)
+	}
+	errBody, ok := np["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("nowPlaying.error = %#v, want a coded object, not a bare string; out=%s", np["error"], out)
+	}
+	if errBody["code"] != "PLEX_SERVER_ERROR" {
+		t.Fatalf("nowPlaying.error.code = %#v, want PLEX_SERVER_ERROR; out=%s", errBody["code"], out)
+	}
+}

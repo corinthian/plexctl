@@ -13,17 +13,18 @@ import (
 // TestExecuteUnknownFlagExitsUsage pins the exit-code contract's
 // highest-leverage line: commands.Execute() — the entry point cmd/plexctl's
 // main() actually calls — routes every error cobra's own Execute() returns
-// through output.Usage, not just the hand-rolled validators exercised
-// elsewhere in this package via root.Execute() directly (which never
-// invokes output.Exit at all).
+// through output.FailErr(output.Err(output.CodeBadRequest, ...)), not just
+// the hand-rolled validators exercised elsewhere in this package via
+// root.Execute() directly (which never invokes output.Exit at all). v2: exit
+// 64 is dead — this is now BAD_REQUEST at exit 1 (docs/error_model_v2.md §1).
 func TestExecuteUnknownFlagExitsUsage(t *testing.T) {
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
 	os.Args = []string{"plexctl", "--nonexistent-flag"}
 
 	out, code := testutil.Capture(t, commands.Execute)
-	if code != 64 {
-		t.Fatalf("exit code = %d, want 64; out=%s", code, out)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (BAD_REQUEST); out=%s", code, out)
 	}
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 1 {
@@ -32,6 +33,13 @@ func TestExecuteUnknownFlagExitsUsage(t *testing.T) {
 	got := mustUnmarshal(t, out)
 	if got["ok"] != false {
 		t.Fatalf("got %#v", got)
+	}
+	errBody, ok := got["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error = %#v, want a coded object", got["error"])
+	}
+	if errBody["code"] != "BAD_REQUEST" {
+		t.Fatalf("error.code = %#v, want BAD_REQUEST", errBody["code"])
 	}
 }
 
@@ -76,8 +84,8 @@ func TestTimeoutFlagNonPositiveExitsUsage(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			os.Args = c.args
 			out, code := testutil.Capture(t, commands.Execute)
-			if code != 64 {
-				t.Fatalf("exit code = %d, want 64; out=%s", code, out)
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1 (BAD_REQUEST); out=%s", code, out)
 			}
 			got := mustUnmarshal(t, out)
 			if got["ok"] != false {

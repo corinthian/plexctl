@@ -78,7 +78,11 @@ func newContextCmd() *cobra.Command {
 		if historyLimit < 0 || historyLimit > 10 {
 			return fmt.Errorf("invalid value for '--history-limit': '%d' is not in the range 0<=x<=10", historyLimit)
 		}
-		output.Out(sessions.Context(clients.Resolve(*client), historyLimit, !noHistory))
+		result, failure := sessions.Context(clients.Resolve(*client), historyLimit, !noHistory)
+		output.Print(result)
+		if failure != nil {
+			output.Exit(failure.ExitCode())
+		}
 		return nil
 	}
 	cmd.Flags().IntVar(&historyLimit, "history-limit", 5, "Number of history entries to bundle (0-10)")

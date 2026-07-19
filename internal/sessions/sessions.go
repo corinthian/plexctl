@@ -13,6 +13,7 @@ import (
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/library"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/queuestate"
 )
 
@@ -233,25 +234,31 @@ func historyRow(entry, meta jsonx.J) jsonx.J {
 	}
 }
 
-// failureSection renders a *api.Error (or any other error) as the {"ok":
-// false, "error": ...} shape shared by every context() section.
-func failureSection(err error) jsonx.J {
-	var e *api.Error
-	if !errors.As(err, &e) {
-		e = &api.Error{Message: err.Error(), Kind: "error"}
-	}
-	return jsonx.J{"ok": false, "error": e.Message}
+// failureSection renders an error as the v2 coded {"ok": false, "error":
+// {code, message, http_status?, hint?}, "data"?} shape shared by every
+// context() section — classified the same way the api.go chokepoint would
+// (api.Classify against TargetPMS; every context sub-fetch targets PMS).
+// The *output.CLIError is also returned so Context can pick the exit class
+// of the first section that failed.
+func failureSection(err error) (jsonx.J, *output.CLIError) {
+	cli := api.Classify(api.AsError(err), api.TargetPMS)
+	return cli.Envelope(), cli
 }
 
 // Context mirrors sessions.context (goroutine-parallel fetch bundle).
 //
 // Three top-level fetches run concurrently; history rows fan out a metadata
 // GET per item (also concurrently) to surface duration + year that the
-// history endpoint omits. Per-section failures degrade gracefully — top-level
-// ok is true as long as nowPlaying succeeded. Go's goroutines are cheap
-// enough that (unlike the Python ThreadPoolExecutor) no worker-count cap is
-// needed here.
-func Context(client jsonx.J, historyLimit int, includeHistory bool) jsonx.J {
+// history endpoint omits. Per-section failures degrade gracefully into their
+// own {"ok":false,"error":{...}} sub-object, but top-level "ok" is the AND
+// of every fetched section (nowPlaying, queue, and history when included) —
+// v1's now-playing-only inconsistency is gone. When top-level ok is false,
+// the second return value is the first failed section's *output.CLIError
+// (declaration order: nowPlaying, queue, history) — its ExitCode() is what
+// the command layer should exit with; nil when every section succeeded.
+// Go's goroutines are cheap enough that (unlike the Python ThreadPoolExecutor)
+// no worker-count cap is needed here.
+func Context(client jsonx.J, historyLimit int, includeHistory bool) (jsonx.J, *output.CLIError) {
 	started := time.Now()
 
 	clientLabel := client["name"]
@@ -285,9 +292,10 @@ func Context(client jsonx.J, historyLimit int, includeHistory bool) jsonx.J {
 	}
 	wg.Wait()
 
+	var npFail *output.CLIError
 	var nowPlayingSection jsonx.J
 	if npErr != nil {
-		nowPlayingSection = failureSection(npErr)
+		nowPlayingSection, npFail = failureSection(npErr)
 	} else {
 		nowPlayingSection = jsonx.J{"ok": true}
 		for k, v := range npData {
@@ -295,9 +303,10 @@ func Context(client jsonx.J, historyLimit int, includeHistory bool) jsonx.J {
 		}
 	}
 
+	var qFail *output.CLIError
 	var queueSection jsonx.J
 	if qErr != nil {
-		queueSection = failureSection(qErr)
+		queueSection, qFail = failureSection(qErr)
 	} else {
 		queueSection = jsonx.J{"ok": true}
 		for k, v := range qData {
@@ -305,10 +314,11 @@ func Context(client jsonx.J, historyLimit int, includeHistory bool) jsonx.J {
 		}
 	}
 
+	var hFail *output.CLIError
 	var historySection jsonx.J
 	if includeHistory {
 		if hErr != nil {
-			historySection = failureSection(hErr)
+			historySection, hFail = failureSection(hErr)
 		} else {
 			rows := make([]jsonx.J, len(hEntries))
 			var rowsWG sync.WaitGroup
@@ -335,8 +345,15 @@ func Context(client jsonx.J, historyLimit int, includeHistory bool) jsonx.J {
 	}
 
 	npOK, _ := nowPlayingSection["ok"].(bool)
+	qOK, _ := queueSection["ok"].(bool)
+	overallOK := npOK && qOK
+	if includeHistory {
+		hOK, _ := historySection["ok"].(bool)
+		overallOK = overallOK && hOK
+	}
+
 	result := jsonx.J{
-		"ok":         npOK,
+		"ok":         overallOK,
 		"client":     clientLabel,
 		"nowPlaying": nowPlayingSection,
 		"queue":      queueSection,
@@ -346,5 +363,15 @@ func Context(client jsonx.J, historyLimit int, includeHistory bool) jsonx.J {
 	if includeHistory {
 		result["history"] = historySection
 	}
-	return result
+
+	var firstFailure *output.CLIError
+	switch {
+	case npFail != nil:
+		firstFailure = npFail
+	case qFail != nil:
+		firstFailure = qFail
+	case hFail != nil:
+		firstFailure = hFail
+	}
+	return result, firstFailure
 }
