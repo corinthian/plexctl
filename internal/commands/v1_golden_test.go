@@ -129,15 +129,19 @@ func TestV2GoldenPlayIdleClient(t *testing.T) {
 	assertGolden(t, g, out, code)
 }
 
-// TestV1GoldenQueueBindHTTP500Staged pins the queue lifecycle's bind-failure
-// (staged) path: a reachable client answers the bind with an HTTP error
-// (not a transport failure), so the new queue's IDs are still surfaced,
-// staged:true records it for `queue-start` recovery, and clientUnreachable
-// is absent (that key is reserved for the transport-timeout shape — see
-// TestV1GoldenRequestTimeout / TestQueueBindTimeoutStagesQueueWithClientUnreachable
-// for that path, which already has thorough inline key-assertion coverage).
-func TestV1GoldenQueueBindHTTP500Staged(t *testing.T) {
-	g := loadV1Golden(t, "v1_queue_bind_http500_staged.golden")
+// TestV2GoldenQueueBindHTTP500Staged pins the queue lifecycle's bind-failure
+// (staged) path: a reachable client answers the bind with an HTTP error (not
+// a transport failure), so the new queue's IDs are still surfaced under
+// data, data.staged is true (recoverable via `queue-start`), and
+// data.clientUnreachable is false (present, not absent — that value is
+// reserved true for the transport-timeout shape, see
+// TestV2GoldenRequestTimeout / TestQueueBindTimeoutStagesQueueWithClientUnreachable,
+// which already has thorough inline key-assertion coverage). MIGRATED to v2
+// (P2-E) when queue.go recoded: PLEX_QUEUE_STAGED, exit 2, structured
+// envelope (the v1 fixture lives in git history). Supersedes
+// v1_queue_bind_http500_staged.golden.
+func TestV2GoldenQueueBindHTTP500Staged(t *testing.T) {
+	g := loadV1Golden(t, "v2_queue_bind_http500_staged.golden")
 	f := newFakePMS(t)
 	f.resolvableClient(t)
 	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})

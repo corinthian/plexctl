@@ -1,0 +1,6 @@
+{
+  "argv": ["plexctl", "queue", "123"],
+  "stdout": "{\"data\":{\"clientUnreachable\":false,\"playQueueID\":\"555\",\"selectedItemID\":\"999\",\"staged\":true},\"error\":{\"code\":\"PLEX_QUEUE_STAGED\",\"hint\":\"run: plexctl queue-start once the client is awake — do NOT re-run queue\",\"message\":\"queue created but the client did not confirm playback (HTTP 500: Internal Server Error)\"},\"ok\":false}\n",
+  "exit_code": 2,
+  "note": "v2 shape (docs/error_model_v2.md): PLEX_QUEUE_STAGED, exit 2, structured error envelope with playQueueID/selectedItemID/staged/clientUnreachable moved under data (clientUnreachable is false here, present not absent, since the bind failure was HTTP-status-shaped not transport-shaped). Supersedes v1_queue_bind_http500_staged.golden (git history) after queue.go's bind-failure path recoded (P2-E)."
+}
