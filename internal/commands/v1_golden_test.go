@@ -140,13 +140,15 @@ func TestV1GoldenQueueBindHTTP500Staged(t *testing.T) {
 	assertGolden(t, g, out, code)
 }
 
-// TestV1GoldenAuthMissing pins the no-token bootstrap failure end-to-end
+// TestV2GoldenAuthMissing pins the no-token bootstrap failure end-to-end
 // through a real CLI invocation (now-playing) — config_test.go's
-// TestRequireMissingExitsOne already covers config.Require("token") in
-// isolation; this fixture pins the same message reached via argv, before
-// any command logic (and before any network dial) runs.
-func TestV1GoldenAuthMissing(t *testing.T) {
-	g := loadV1Golden(t, "v1_auth_missing_token.golden")
+// TestRequireMissingExitsFive already covers config.Require("token") in
+// isolation; this fixture pins the same envelope reached via argv, before
+// any command logic (and before any network dial) runs. MIGRATED to v2
+// when config.Require recoded to output.FailErr (P2-A): PLEX_AUTH_REQUIRED,
+// exit 5, structured envelope (the v1 fixture lives in git history).
+func TestV2GoldenAuthMissing(t *testing.T) {
+	g := loadV1Golden(t, "v2_auth_missing_token.golden")
 	f := newFakePMS(t)
 	// Overwrite config.toml to drop the token line testutil.Setup wrote,
 	// keeping server_url pointed at the fake server so even a regression

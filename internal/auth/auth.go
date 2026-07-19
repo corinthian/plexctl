@@ -4,11 +4,9 @@ package auth
 
 import (
 	"bufio"
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -66,31 +64,6 @@ func randomClientIDSuffix() string {
 	return hex.EncodeToString(b)
 }
 
-// classifyAuthTransport mirrors auth.py's exception ladder, which — unlike
-// api.py's — catches ConnectionError BEFORE Timeout. requests'
-// ConnectTimeout subclasses ConnectionError, so a connect-phase timeout is
-// "connection failed" here; only read timeouts get the standard
-// "request timed out" prefix (output.Out's exit-2 match, shared with every
-// other command — auth used to spell this "auth request timed out", the
-// third and last of the package's now-unified timeout shapes). The
-// sign-in client uses a bounded dialer so dial-phase stalls surface as
-// dial op-errors rather than the phase-blind Client.Timeout error.
-func classifyAuthTransport(err error) string {
-	var opErr *net.OpError
-	if errors.As(err, &opErr) && opErr.Op == "dial" {
-		return "connection failed: " + api.SanitizeError(err)
-	}
-	var ne net.Error
-	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
-		return "request timed out: " + api.SanitizeError(err)
-	}
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		return "connection failed: " + api.SanitizeError(err)
-	}
-	return "auth request failed: " + api.SanitizeError(err)
-}
-
 // validatePMSURL rejects any scheme other than http/https, userinfo,
 // fragments, and query strings before the URL is ever used on the network
 // — see README Security section. A plain-http scheme is still accepted;
@@ -145,7 +118,7 @@ func Login() {
 
 	parsedURL, err := validatePMSURL(serverURL)
 	if err != nil {
-		output.Fail(err.Error())
+		output.FailErr(output.Err(output.CodeBadRequest, err.Error()))
 		return
 	}
 	if parsedURL.Scheme == "http" {
@@ -176,6 +149,12 @@ func Login() {
 		"X-Plex-Client-Identifier": clientID,
 	}
 
+	// TODO(P2): docs/error_model_v2.md §3's auth.go mapping doesn't name
+	// this site (only "the two classifyAuthTransport Out sites" — the
+	// client.Do and body-read failures below). Left on the v1 output.Fail
+	// path deliberately rather than inventing a code; by analogy with the
+	// PMS-verify request-build site it would become
+	// api.Classify(api.AsError(err), api.TargetCloud) then output.FailErr.
 	req, err := http.NewRequest(http.MethodPost, plexTVSignIn, nil)
 	if err != nil {
 		output.Fail("auth request failed: " + err.Error())
@@ -194,7 +173,7 @@ func Login() {
 	})
 	resp, err := client.Do(req)
 	if err != nil {
-		output.Out(jsonx.J{"ok": false, "error": classifyAuthTransport(err)})
+		output.FailErr(api.Classify(api.AsError(err), api.TargetCloud))
 		return
 	}
 	defer resp.Body.Close()
@@ -203,39 +182,40 @@ func Login() {
 	// parse error downstream, not a sentinel to handle.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		output.Out(jsonx.J{"ok": false, "error": classifyAuthTransport(err)})
+		output.FailErr(api.Classify(api.AsError(err), api.TargetCloud))
 		return
 	}
+	const authFailedHint = "check credentials and retry: plexctl auth login"
 	if resp.StatusCode >= 400 {
-		output.Fail(fmt.Sprintf("auth failed: HTTP %d", resp.StatusCode))
+		output.FailErr(output.Err(output.CodeAuthFailed, fmt.Sprintf("auth failed: HTTP %d", resp.StatusCode)).WithHint(authFailedHint))
 		return
 	}
 
 	var payload any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		output.Fail(fmt.Sprintf("plex.tv returned non-JSON response: %s", err.Error()))
+		output.FailErr(output.Err(output.CodeAuthFailed, fmt.Sprintf("plex.tv returned non-JSON response: %s", err.Error())).WithHint(authFailedHint))
 		return
 	}
 	payloadMap, ok := payload.(map[string]any)
 	if !ok {
-		output.Fail("unexpected auth response shape from plex.tv")
+		output.FailErr(output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint))
 		return
 	}
 	user, ok := payloadMap["user"].(map[string]any)
 	if !ok {
-		output.Fail("unexpected auth response shape from plex.tv")
+		output.FailErr(output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint))
 		return
 	}
 	token, ok := user["authToken"].(string)
 	if !ok {
-		output.Fail("unexpected auth response shape from plex.tv")
+		output.FailErr(output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint))
 		return
 	}
 
 	// Verify PMS is reachable before writing config
 	verifyReq, err := http.NewRequest(http.MethodGet, strings.TrimRight(serverURL, "/")+"/", nil)
 	if err != nil {
-		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, api.SanitizeError(err)))
+		output.FailErr(api.Classify(api.AsError(err), api.TargetPMS))
 		return
 	}
 	for k, v := range headers {
@@ -245,12 +225,17 @@ func Login() {
 	verifyClient := api.NewHTTPClient(10*time.Second, nil)
 	verifyResp, err := verifyClient.Do(verifyReq)
 	if err != nil {
-		output.Fail(fmt.Sprintf("PMS unreachable at %s: %s", serverURL, api.SanitizeError(err)))
+		output.FailErr(api.Classify(api.AsError(err), api.TargetPMS))
 		return
 	}
 	defer verifyResp.Body.Close()
 	if verifyResp.StatusCode >= 400 {
-		output.Fail(fmt.Sprintf("PMS unreachable at %s: %d %s", serverURL, verifyResp.StatusCode, http.StatusText(verifyResp.StatusCode)))
+		// Wrong URL/token, not a transport problem — keep the "PMS
+		// unreachable at …" message text (pre-v2 wording), same hint as the
+		// other PLEX_AUTH_FAILED sites above.
+		output.FailErr(output.Err(output.CodeAuthFailed,
+			fmt.Sprintf("PMS unreachable at %s: %d %s", serverURL, verifyResp.StatusCode, http.StatusText(verifyResp.StatusCode))).
+			WithHint("check credentials and retry: plexctl auth login"))
 		return
 	}
 
@@ -267,7 +252,7 @@ func Login() {
 	// the Go equivalent is the standard JSON error + exit 1 — never a false
 	// "token saved" success.
 	if err := config.Save(pairs); err != nil {
-		output.Fail(fmt.Sprintf("failed to write config at %s: %s", config.Path(), err.Error()))
+		output.FailErr(output.Err(output.CodeInternal, fmt.Sprintf("failed to write config at %s: %s", config.Path(), err.Error())))
 		return
 	}
 

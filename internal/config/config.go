@@ -46,7 +46,9 @@ func Path() string {
 func Load() jsonx.J {
 	m, err := TryLoad()
 	if err != nil {
-		output.Fail(fmt.Sprintf("invalid config at %s: %v — run plexctl auth login", Path(), err))
+		output.FailErr(output.Err(output.CodeAuthRequired,
+			fmt.Sprintf("invalid config at %s: %v — run plexctl auth login", Path(), err)).
+			WithHint("run: plexctl auth login"))
 		return jsonx.J{} // reached only when output.Exit is a test seam
 	}
 	return m
@@ -86,7 +88,9 @@ func StringOr(cfg jsonx.J, key, def string) string {
 func Require(key string) string {
 	v := Load()[key]
 	if !jsonx.Truthy(v) {
-		output.Fail(fmt.Sprintf("missing config key: %s — run plexctl auth login", key))
+		output.FailErr(output.Err(output.CodeAuthRequired,
+			fmt.Sprintf("missing config key: %s — run plexctl auth login", key)).
+			WithHint("run: plexctl auth login"))
 		return "" // test seam
 	}
 	return jsonx.AsStr(v)

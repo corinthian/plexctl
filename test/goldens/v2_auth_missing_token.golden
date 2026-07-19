@@ -1,0 +1,6 @@
+{
+  "argv": ["plexctl", "now-playing"],
+  "stdout": "{\"error\":{\"code\":\"PLEX_AUTH_REQUIRED\",\"hint\":\"run: plexctl auth login\",\"message\":\"missing config key: token — run plexctl auth login\"},\"ok\":false}\n",
+  "exit_code": 5,
+  "note": "v2 shape (docs/error_model_v2.md): PLEX_AUTH_REQUIRED, exit 5, structured error envelope. Supersedes v1_auth_missing_token.golden (git history) after config.Require migrated to output.FailErr (P2-A)."
+}

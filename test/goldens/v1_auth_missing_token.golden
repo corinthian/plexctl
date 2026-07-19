@@ -1,5 +1,0 @@
-{
-  "argv": ["plexctl", "now-playing"],
-  "stdout": "{\"error\":\"missing config key: token — run plexctl auth login\",\"ok\":false}\n",
-  "exit_code": 1
-}
