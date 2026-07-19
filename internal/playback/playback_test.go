@@ -15,6 +15,7 @@ import (
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
 
@@ -133,12 +134,21 @@ func equalStrings(a, b []string) bool {
 
 // --- transport commands: happy path, commandID, error classification -------
 
+// TestPlayerCmdHappyPathHeadersAndParams exercises playerCmd's generic
+// header/param shape via Pause rather than Play: Play (v2) layers an
+// idle-play engagement poll on top (see TestPlayEngagedFirstPollSucceeds /
+// TestPlayIdleClientReportsNotApplied below), which is irrelevant to what
+// this test checks and would otherwise need PMS session wiring just to
+// avoid a spurious NOT_APPLIED.
 func TestPlayerCmdHappyPathHeadersAndParams(t *testing.T) {
 	fc, csrv := newFakeCompanion(t)
 	testutil.Setup(t, "http://pms.test:32400")
 	client := fakeClient(csrv.URL)
 
-	result := Play(client)
+	result, cliErr := Pause(client)
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
 	if !jsonx.Truthy(result["ok"]) {
 		t.Fatalf("want ok, got %#v", result)
 	}
@@ -159,8 +169,8 @@ func TestCommandIDMonotonicAcrossCalls(t *testing.T) {
 	testutil.Setup(t, "http://pms.test:32400")
 	client := fakeClient(csrv.URL)
 
-	Play(client)
 	Pause(client)
+	Stop(client)
 	calls := fc.snapshot()
 	if len(calls) != 2 {
 		t.Fatalf("want 2 calls, got %d", len(calls))
@@ -334,13 +344,18 @@ func TestConnectionFailedClassification(t *testing.T) {
 	testutil.Setup(t, "http://pms.test:32400")
 	client := fakeClient("http://127.0.0.1:1") // nothing listens here
 
-	result := Play(client)
-	if jsonx.Truthy(result["ok"]) {
-		t.Fatalf("want failure, got %#v", result)
+	result, cliErr := Play(client)
+	if result != nil {
+		t.Fatalf("want nil result on failure, got %#v", result)
 	}
-	errStr, _ := result["error"].(string)
-	if !strings.HasPrefix(errStr, "connection failed:") {
-		t.Fatalf("want 'connection failed:' prefix, got %q", errStr)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeClientUnreachable {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeClientUnreachable)
+	}
+	if !strings.HasPrefix(cliErr.Message, "connection failed:") {
+		t.Fatalf("want 'connection failed:' prefix, got %q", cliErr.Message)
 	}
 }
 
@@ -353,10 +368,15 @@ func TestTimeoutClassification(t *testing.T) {
 	api.SetTimeoutOverride(0.05)
 	t.Cleanup(api.ClearTimeoutOverride)
 
-	result := Play(fakeClient(slow.URL))
-	errStr, _ := result["error"].(string)
-	if !strings.HasPrefix(errStr, "request timed out:") {
-		t.Fatalf("want 'request timed out:' prefix, got %q", errStr)
+	_, cliErr := Play(fakeClient(slow.URL))
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeClientUnreachable {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeClientUnreachable)
+	}
+	if !strings.HasPrefix(cliErr.Message, "request timed out:") {
+		t.Fatalf("want 'request timed out:' prefix, got %q", cliErr.Message)
 	}
 }
 
@@ -365,10 +385,108 @@ func TestHTTPErrorClassification(t *testing.T) {
 	fc.failPath("/player/playback/play", 404)
 	testutil.Setup(t, "http://pms.test:32400")
 
-	result := Play(fakeClient(csrv.URL))
-	errStr, _ := result["error"].(string)
-	if !strings.HasPrefix(errStr, "HTTP 404:") {
-		t.Fatalf("want 'HTTP 404:' prefix, got %q", errStr)
+	_, cliErr := Play(fakeClient(csrv.URL))
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeHTTPError {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeHTTPError)
+	}
+	if cliErr.HTTPStatus != 404 {
+		t.Fatalf("http status = %d, want 404", cliErr.HTTPStatus)
+	}
+	if !strings.HasPrefix(cliErr.Message, "HTTP 404:") {
+		t.Fatalf("want 'HTTP 404:' prefix, got %q", cliErr.Message)
+	}
+}
+
+// --- Play: idle-play NOT_APPLIED invariant (v2, docs/error_model_v2.md §5) -
+
+// TestPlayEngagedFirstPollSucceeds covers the common case: the client is
+// already showing a non-idle session on the immediate (no-sleep) first poll.
+func TestPlayEngagedFirstPollSucceeds(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 5000}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	result, cliErr := Play(fakeClient(csrv.URL))
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	if got := fc.paths(); len(got) != 1 || got[0] != "/player/playback/play" {
+		t.Fatalf("companion calls = %v, want exactly one play", got)
+	}
+}
+
+// TestPlayEngagedOnSecondPollSucceeds proves the loop actually retries: the
+// first /status/sessions read shows nothing, the second (after
+// EngagePollDelay) shows a session — success, not NOT_APPLIED.
+func TestPlayEngagedOnSecondPollSucceeds(t *testing.T) {
+	oldDelay := EngagePollDelay
+	EngagePollDelay = 0
+	t.Cleanup(func() { EngagePollDelay = oldDelay })
+
+	_, csrv := newFakeCompanion(t)
+	sessionCalls := 0
+	pms := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/status/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		sessionCalls++
+		meta := []any{}
+		if sessionCalls >= 2 {
+			meta = append(meta, jsonx.J{
+				"viewOffset": 1000,
+				"Player":     jsonx.J{"machineIdentifier": "atv-1", "state": "playing"},
+			})
+		}
+		b, _ := json.Marshal(jsonx.J{"MediaContainer": jsonx.J{"Metadata": meta}})
+		w.Write(b)
+	}))
+	t.Cleanup(pms.Close)
+	testutil.Setup(t, pms.URL)
+
+	result, cliErr := Play(fakeClient(csrv.URL))
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
+	if !jsonx.Truthy(result["ok"]) {
+		t.Fatalf("want ok, got %#v", result)
+	}
+	if sessionCalls < 2 {
+		t.Fatalf("want at least 2 session polls, got %d", sessionCalls)
+	}
+}
+
+// TestPlayIdleClientReportsNotApplied is the NOT_APPLIED path: the Companion
+// accept succeeds but both session polls come back idle/absent, so bare
+// `play` must not report a false ok:true.
+func TestPlayIdleClientReportsNotApplied(t *testing.T) {
+	oldDelay := EngagePollDelay
+	EngagePollDelay = 0
+	t.Cleanup(func() { EngagePollDelay = oldDelay })
+
+	_, csrv := newFakeCompanion(t)
+	pms := newFakePMS(t, nil, "server-mid") // no session at all -- idle
+	testutil.Setup(t, pms.URL)
+
+	result, cliErr := Play(fakeClient(csrv.URL))
+	if result != nil {
+		t.Fatalf("want nil result, got %#v", result)
+	}
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeNotApplied {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeNotApplied)
+	}
+	if cliErr.Hint != "start items with: plexctl play-media RATING_KEY" {
+		t.Fatalf("hint = %q", cliErr.Hint)
 	}
 }
 
@@ -422,26 +540,41 @@ func TestPlayerGetTransportErrorWraps(t *testing.T) {
 // --- seek ----------------------------------------------------------------
 
 func TestSeekRejectsBadFormat(t *testing.T) {
-	result := Seek(fakeClient("http://unused"), "not-a-time", true)
-	if got := result["error"]; got != "unrecognised position format: 'not-a-time'" {
-		t.Fatalf("error = %q", got)
+	_, cliErr := Seek(fakeClient("http://unused"), "not-a-time", true)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
 	}
-	if jsonx.Truthy(result["ok"]) {
-		t.Fatal("want ok=false")
+	if cliErr.Code != output.CodeBadRequest {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeBadRequest)
+	}
+	if cliErr.Message != "unrecognised position format: 'not-a-time'" {
+		t.Fatalf("message = %q", cliErr.Message)
 	}
 }
 
 func TestSeekRejectsSecondsGE60(t *testing.T) {
-	result := Seek(fakeClient("http://unused"), "99:99", true)
-	if got := result["error"]; got != "invalid seek position: seconds must be < 60" {
-		t.Fatalf("error = %q", got)
+	_, cliErr := Seek(fakeClient("http://unused"), "99:99", true)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeBadRequest {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeBadRequest)
+	}
+	if cliErr.Message != "invalid seek position: seconds must be < 60" {
+		t.Fatalf("message = %q", cliErr.Message)
 	}
 }
 
 func TestSeekRejectsMinutesGE60WithHours(t *testing.T) {
-	result := Seek(fakeClient("http://unused"), "1:99:30", true)
-	if got := result["error"]; got != "invalid seek position: minutes must be < 60 when hours given" {
-		t.Fatalf("error = %q", got)
+	_, cliErr := Seek(fakeClient("http://unused"), "1:99:30", true)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeBadRequest {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeBadRequest)
+	}
+	if cliErr.Message != "invalid seek position: minutes must be < 60 when hours given" {
+		t.Fatalf("message = %q", cliErr.Message)
 	}
 }
 
@@ -451,9 +584,15 @@ func TestSeekAcceptsHighMinutesWithoutHours(t *testing.T) {
 	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 0}, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := Seek(fakeClient(csrv.URL), "99:30", true)
+	result, cliErr := Seek(fakeClient(csrv.URL), "99:30", true)
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
 	if !jsonx.Truthy(result["ok"]) {
 		t.Fatalf("want ok, got %#v", result)
+	}
+	if result["playState"] != "playing" {
+		t.Fatalf("playState = %v, want playing", result["playState"])
 	}
 	seekOffset(t, fc, "5970000") // (99*60+30)*1000
 }
@@ -476,9 +615,15 @@ func TestSeekAbsoluteMMSS(t *testing.T) {
 	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 0}, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := Seek(fakeClient(csrv.URL), "1:30", true)
+	result, cliErr := Seek(fakeClient(csrv.URL), "1:30", true)
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
 	if !jsonx.Truthy(result["ok"]) {
 		t.Fatalf("want ok, got %#v", result)
+	}
+	if result["playState"] != "playing" {
+		t.Fatalf("playState = %v, want playing", result["playState"])
 	}
 	seekOffset(t, fc, "90000")
 }
@@ -488,7 +633,10 @@ func TestSeekAbsoluteHHMMSS(t *testing.T) {
 	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 0}, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := Seek(fakeClient(csrv.URL), "1:00:00", true)
+	result, cliErr := Seek(fakeClient(csrv.URL), "1:00:00", true)
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
 	if !jsonx.Truthy(result["ok"]) {
 		t.Fatalf("want ok, got %#v", result)
 	}
@@ -500,7 +648,10 @@ func TestSeekRelativePlusSeconds(t *testing.T) {
 	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 60000}, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := Seek(fakeClient(csrv.URL), "+30s", true)
+	result, cliErr := Seek(fakeClient(csrv.URL), "+30s", true)
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
 	if !jsonx.Truthy(result["ok"]) {
 		t.Fatalf("want ok, got %#v", result)
 	}
@@ -512,7 +663,10 @@ func TestSeekRelativeMinusMinuteClampsToZero(t *testing.T) {
 	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 60000}, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := Seek(fakeClient(csrv.URL), "-1m", true)
+	result, cliErr := Seek(fakeClient(csrv.URL), "-1m", true)
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
 	if !jsonx.Truthy(result["ok"]) {
 		t.Fatalf("want ok, got %#v", result)
 	}
@@ -524,9 +678,18 @@ func TestSeekRelativeNoSession(t *testing.T) {
 	pms := newFakePMS(t, nil, "server-mid") // no matching session
 	testutil.Setup(t, pms.URL)
 
-	result := Seek(fakeClient(csrv.URL), "+30s", true)
-	if got := result["error"]; got != "could not determine current playback position" {
-		t.Fatalf("error = %q", got)
+	_, cliErr := Seek(fakeClient(csrv.URL), "+30s", true)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeNothingPlaying {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeNothingPlaying)
+	}
+	if cliErr.Message != "could not determine current playback position" {
+		t.Fatalf("message = %q", cliErr.Message)
+	}
+	if cliErr.Hint != "nothing to seek — start playback first" {
+		t.Fatalf("hint = %q", cliErr.Hint)
 	}
 }
 
@@ -539,9 +702,15 @@ func TestSeekPausedDanceOrdering(t *testing.T) {
 	pms := newFakePMS(t, jsonx.J{"state": "paused", "viewOffset": 0}, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := Seek(fakeClient(csrv.URL), "1:30", true)
+	result, cliErr := Seek(fakeClient(csrv.URL), "1:30", true)
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
 	if !jsonx.Truthy(result["ok"]) {
 		t.Fatalf("want ok, got %#v", result)
+	}
+	if result["playState"] != "paused" {
+		t.Fatalf("playState = %v, want paused", result["playState"])
 	}
 	got := fc.paths()
 	want := []string{"/player/playback/play", "/player/playback/seekTo", "/player/playback/pause"}
@@ -553,12 +722,19 @@ func TestSeekPausedDanceOrdering(t *testing.T) {
 func TestSeekNoUnpauseSkipsDance(t *testing.T) {
 	fc, csrv := newFakeCompanion(t)
 	// No PMS server needed: unpause=false + absolute position never fetches
-	// a session.
+	// a session, so playState has no observed state to report and falls
+	// back to the documented default ("playing").
 	testutil.Setup(t, "http://pms.test:32400")
 
-	result := Seek(fakeClient(csrv.URL), "1:30", false)
+	result, cliErr := Seek(fakeClient(csrv.URL), "1:30", false)
+	if cliErr != nil {
+		t.Fatalf("want no error, got %#v", cliErr)
+	}
 	if !jsonx.Truthy(result["ok"]) {
 		t.Fatalf("want ok, got %#v", result)
+	}
+	if result["playState"] != "playing" {
+		t.Fatalf("playState = %v, want playing (default — no session read)", result["playState"])
 	}
 	got := fc.paths()
 	want := []string{"/player/playback/seekTo"}
@@ -573,16 +749,57 @@ func TestSeekResumeFailureMessage(t *testing.T) {
 	pms := newFakePMS(t, jsonx.J{"state": "paused", "viewOffset": 0}, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := Seek(fakeClient(csrv.URL), "1:30", true)
-	errStr, _ := result["error"].(string)
-	if !strings.HasPrefix(errStr, "could not resume before seek: ") {
-		t.Fatalf("error = %q", errStr)
+	_, cliErr := Seek(fakeClient(csrv.URL), "1:30", true)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeSeekFailed {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeSeekFailed)
+	}
+	if !strings.HasPrefix(cliErr.Message, "could not resume before seek: ") {
+		t.Fatalf("message = %q", cliErr.Message)
+	}
+	if cliErr.Hint != "try again" {
+		t.Fatalf("hint = %q, want %q", cliErr.Hint, "try again")
+	}
+	if got := cliErr.Data["seeked"]; got != false {
+		t.Fatalf("data.seeked = %v, want false", got)
+	}
+	if got := cliErr.Data["repaused"]; got != false {
+		t.Fatalf("data.repaused = %v, want false", got)
 	}
 	for _, p := range fc.paths() {
 		if strings.HasSuffix(p, "/seekTo") {
 			t.Fatal("seekTo must not be called after a resume failure")
 		}
 	}
+}
+
+// TestSeekMidSequenceFailure covers the seekTo call itself failing (not the
+// resume, not the re-pause): CodeSeekFailed with neither leg completed.
+func TestSeekMidSequenceFailure(t *testing.T) {
+	fc, csrv := newFakeCompanion(t)
+	fc.failPath("/player/playback/seekTo", 500)
+	pms := newFakePMS(t, jsonx.J{"state": "playing", "viewOffset": 0}, "server-mid")
+	testutil.Setup(t, pms.URL)
+
+	_, cliErr := Seek(fakeClient(csrv.URL), "1:30", true)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeSeekFailed {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeSeekFailed)
+	}
+	if cliErr.Hint != "try again" {
+		t.Fatalf("hint = %q, want %q", cliErr.Hint, "try again")
+	}
+	if got := cliErr.Data["seeked"]; got != false {
+		t.Fatalf("data.seeked = %v, want false", got)
+	}
+	if got := cliErr.Data["repaused"]; got != false {
+		t.Fatalf("data.repaused = %v, want false", got)
+	}
+	_ = fc
 }
 
 func TestSeekRepauseFailureMessage(t *testing.T) {
@@ -595,11 +812,29 @@ func TestSeekRepauseFailureMessage(t *testing.T) {
 	pms := newFakePMS(t, jsonx.J{"state": "paused", "viewOffset": 0}, "server-mid")
 	testutil.Setup(t, pms.URL)
 
-	result := Seek(fakeClient(csrv.URL), "1:30", true)
-	errStr, _ := result["error"].(string)
-	if !strings.HasPrefix(errStr, "seeked but failed to restore pause state: ") {
-		t.Fatalf("error = %q", errStr)
+	_, cliErr := Seek(fakeClient(csrv.URL), "1:30", true)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
 	}
+	if cliErr.Code != output.CodeSeekFailed {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeSeekFailed)
+	}
+	if !strings.HasPrefix(cliErr.Message, "seeked but failed to restore pause state: ") {
+		t.Fatalf("message = %q", cliErr.Message)
+	}
+	// The seek itself landed -- the hint would wrongly suggest retrying the
+	// whole sequence, so v2 leaves it empty here (contract-mandated
+	// exception to CodeSeekFailed's default "try again" hint).
+	if cliErr.Hint != "" {
+		t.Fatalf("hint = %q, want empty", cliErr.Hint)
+	}
+	if got := cliErr.Data["seeked"]; got != true {
+		t.Fatalf("data.seeked = %v, want true", got)
+	}
+	if got := cliErr.Data["repaused"]; got != false {
+		t.Fatalf("data.repaused = %v, want false", got)
+	}
+	_ = fc
 }
 
 // --- PlayMedia / PlayQueue -------------------------------------------------
@@ -701,19 +936,21 @@ func TestPlayRefusesRedirect(t *testing.T) {
 	t.Cleanup(srv.Close)
 	testutil.Setup(t, "http://pms.test:32400")
 
-	result := Play(fakeClient(srv.URL))
-	if jsonx.Truthy(result["ok"]) {
-		t.Fatalf("want failure, got %#v", result)
+	_, cliErr := Play(fakeClient(srv.URL))
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
 	}
 	if targetHit {
 		t.Fatal("redirect target received a request — CheckRedirect did not fire before the request")
 	}
-	errStr, _ := result["error"].(string)
-	if !strings.HasPrefix(errStr, "connection failed:") {
-		t.Fatalf("want 'connection failed:' prefix, got %q", errStr)
+	if cliErr.Code != output.CodeClientUnreachable {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeClientUnreachable)
 	}
-	if !strings.Contains(errStr, "redirect refused") {
-		t.Fatalf("want 'redirect refused' in message, got %q", errStr)
+	if !strings.HasPrefix(cliErr.Message, "connection failed:") {
+		t.Fatalf("want 'connection failed:' prefix, got %q", cliErr.Message)
+	}
+	if !strings.Contains(cliErr.Message, "redirect refused") {
+		t.Fatalf("want 'redirect refused' in message, got %q", cliErr.Message)
 	}
 }
 

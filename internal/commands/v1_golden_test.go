@@ -13,6 +13,7 @@ import (
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/commands"
+	"github.com/corinthian/plexctl/internal/playback"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
 
@@ -105,17 +106,25 @@ func TestV1GoldenSearchNoResults(t *testing.T) {
 	assertGolden(t, g, out, code)
 }
 
-// TestV1GoldenPlayIdleClient pins `play` against a resolvable client with no
-// wired /status/sessions data (idle — nothing playing). playerCmd never
-// checks session state, so v1 sends the Companion play command regardless
-// and reports ok:true unconditionally. A v2 error model that wants "nothing
-// to resume" on an idle client would change this exact line — that's the
-// behavior this fixture exists to catch.
-func TestV1GoldenPlayIdleClient(t *testing.T) {
-	g := loadV1Golden(t, "v1_play_idle_client.golden")
+// TestV2GoldenPlayIdleClient pins `play` against a resolvable client with no
+// wired /status/sessions data (idle — nothing playing). MIGRATED to v2 when
+// playback.Play gained the idle-play engagement poll (contract §5): the
+// Companion accept still gets a 200, but both post-accept /status/sessions
+// polls come back idle/empty (f.onSessionsIdle), so the accept is now
+// reported as NOT_APPLIED (exit 6) instead of v1's unconditional ok:true —
+// playerCmd/Play never used to check session state at all (the v1 fixture,
+// ok:true exit 0, lives in git history). EngagePollDelay is zeroed for the
+// test so the second poll doesn't cost a real 1s sleep.
+func TestV2GoldenPlayIdleClient(t *testing.T) {
+	g := loadV1Golden(t, "v2_play_idle_client.golden")
+	oldDelay := playback.EngagePollDelay
+	playback.EngagePollDelay = 0
+	t.Cleanup(func() { playback.EngagePollDelay = oldDelay })
+
 	f := newFakePMS(t)
 	f.resolvableClient(t)
 	f.onStatus("GET", "/player/playback/play", 200)
+	f.onSessionsIdle()
 	out, code := runForGolden(t, g.Argv)
 	assertGolden(t, g, out, code)
 }

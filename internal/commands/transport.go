@@ -35,7 +35,12 @@ func newPlayCmd() *cobra.Command {
 	}
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		output.Out(playback.Play(clients.Resolve(*client)))
+		result, cliErr := playback.Play(clients.Resolve(*client))
+		if cliErr != nil {
+			output.FailErr(cliErr)
+			return nil
+		}
+		output.Out(result)
 		return nil
 	}
 	return cmd
@@ -49,7 +54,12 @@ func newPauseCmd() *cobra.Command {
 	}
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		output.Out(playback.Pause(clients.Resolve(*client)))
+		result, cliErr := playback.Pause(clients.Resolve(*client))
+		if cliErr != nil {
+			output.FailErr(cliErr)
+			return nil
+		}
+		output.Out(result)
 		return nil
 	}
 	return cmd
@@ -63,7 +73,12 @@ func newStopCmd() *cobra.Command {
 	}
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		output.Out(playback.Stop(clients.Resolve(*client)))
+		result, cliErr := playback.Stop(clients.Resolve(*client))
+		if cliErr != nil {
+			output.FailErr(cliErr)
+			return nil
+		}
+		output.Out(result)
 		return nil
 	}
 	return cmd
@@ -77,7 +92,12 @@ func newNextCmd() *cobra.Command {
 	}
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		output.Out(playback.StepForward(clients.Resolve(*client)))
+		result, cliErr := playback.StepForward(clients.Resolve(*client))
+		if cliErr != nil {
+			output.FailErr(cliErr)
+			return nil
+		}
+		output.Out(result)
 		return nil
 	}
 	return cmd
@@ -91,7 +111,12 @@ func newPrevCmd() *cobra.Command {
 	}
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		output.Out(playback.StepBack(clients.Resolve(*client)))
+		result, cliErr := playback.StepBack(clients.Resolve(*client))
+		if cliErr != nil {
+			output.FailErr(cliErr)
+			return nil
+		}
+		output.Out(result)
 		return nil
 	}
 	return cmd
@@ -173,7 +198,12 @@ unrecognized token. Use "--" to force everything after it into POSITION.`,
 				return fmt.Errorf("POSITION required")
 			}
 			position := strings.Join(positionParts, " ")
-			output.Out(playback.Seek(clients.Resolve(client), position, !noUnpause))
+			result, cliErr := playback.Seek(clients.Resolve(client), position, !noUnpause)
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
@@ -197,19 +227,26 @@ func setSeekTimeoutOverride(raw string) error {
 	return nil
 }
 
+// newVolumeCmd is an unconditional refusal (v2, docs/error_model_v2.md §2
+// CodeUnsupported row): the Apple TV Companion listener accepts a volume
+// setParameters command and silently ignores it, so v1's "success" was
+// theater. v2 absorbs the skill's ban directly into the binary — no client
+// resolution, no Companion round trip, just CodeUnsupported at exit 2 after
+// LEVEL's own range validation (which stays, so a malformed LEVEL is still a
+// usage error rather than being masked by the refusal).
 func newVolumeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "volume LEVEL",
 		Short: "Set volume to LEVEL (integer 0-100).",
 		Args:  cobra.ExactArgs(1),
 	}
-	client := addClientFlag(cmd)
+	_ = addClientFlag(cmd) // kept for CLI/flag compatibility; unused — no client is ever resolved
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		level, err := strconv.Atoi(args[0])
 		if err != nil || level < 0 || level > 100 {
 			return fmt.Errorf("invalid value for 'LEVEL': '%s' is not in the range 0<=x<=100", args[0])
 		}
-		output.Out(playback.SetVolume(clients.Resolve(*client), level))
+		output.FailErr(output.Err(output.CodeUnsupported, "volume control is not supported — the client ignores Companion volume commands"))
 		return nil
 	}
 	return cmd
