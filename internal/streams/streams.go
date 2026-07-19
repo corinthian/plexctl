@@ -18,6 +18,7 @@ import (
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/library"
+	"github.com/corinthian/plexctl/internal/output"
 )
 
 // Plex streamType discriminator on a Stream node.
@@ -205,59 +206,68 @@ func firstPartID(meta jsonx.J) any {
 }
 
 // SetAudioStream mirrors streams.set_audio_stream: select an audio track on
-// one item, by language code or explicit stream id.
-func SetAudioStream(ratingKey string, language string, streamID *int) jsonx.J {
+// one item, by language code or explicit stream id. On failure it returns a
+// *output.CLIError (v2 coded contract) instead of an {"ok":false,...} map;
+// the command layer forwards that to output.FailErr.
+func SetAudioStream(ratingKey string, language string, streamID *int) (jsonx.J, *output.CLIError) {
 	meta := library.Metadata(ratingKey)
 	if !jsonx.Truthy(meta) {
-		return jsonx.J{"ok": false, "error": "no metadata for ratingKey " + ratingKey}
+		return nil, output.Err(output.CodeNotFound, "no metadata for ratingKey "+ratingKey)
 	}
 	partID, sid := resolveTrack(meta, Audio, language, streamID)
 	if partID == nil {
-		target := language + " audio"
 		if streamID != nil {
-			target = "audio stream id " + strconv.Itoa(*streamID)
+			return nil, output.Err(output.CodeTrackNotFound,
+				"no audio stream id "+strconv.Itoa(*streamID)+" track on "+ratingKey).
+				WithData("streamID", *streamID)
 		}
-		return jsonx.J{"ok": false, "error": "no " + target + " track on " + ratingKey}
+		return nil, output.Err(output.CodeTrackNotFound,
+			"no "+language+" audio track on "+ratingKey).
+			WithData("language", language)
 	}
 	api.Put("/library/parts/"+jsonx.AsStr(partID), url.Values{
 		"audioStreamID": {jsonx.AsStr(sid)},
 		"allParts":      {"1"},
 	})
-	return jsonx.J{"ok": true, "ratingKey": jsonx.AsStr(ratingKey), "partId": partID, "audioStreamID": sid}
+	return jsonx.J{"ok": true, "ratingKey": jsonx.AsStr(ratingKey), "partId": partID, "audioStreamID": sid}, nil
 }
 
 // SetSubtitleStream mirrors streams.set_subtitle_stream: select a subtitle
-// track on one item, or disable subtitles (subtitleStreamID=0).
-func SetSubtitleStream(ratingKey string, language string, streamID *int, disable bool) jsonx.J {
+// track on one item, or disable subtitles (subtitleStreamID=0). On failure it
+// returns a *output.CLIError; see SetAudioStream.
+func SetSubtitleStream(ratingKey string, language string, streamID *int, disable bool) (jsonx.J, *output.CLIError) {
 	meta := library.Metadata(ratingKey)
 	if !jsonx.Truthy(meta) {
-		return jsonx.J{"ok": false, "error": "no metadata for ratingKey " + ratingKey}
+		return nil, output.Err(output.CodeNotFound, "no metadata for ratingKey "+ratingKey)
 	}
 	if disable {
 		partID := firstPartID(meta)
 		if partID == nil {
-			return jsonx.J{"ok": false, "error": "no media part on " + ratingKey}
+			return nil, output.Err(output.CodeTrackNotFound, "no media part on "+ratingKey)
 		}
 		api.Put("/library/parts/"+jsonx.AsStr(partID), url.Values{
 			"subtitleStreamID": {"0"},
 			"allParts":         {"1"},
 		})
 		return jsonx.J{"ok": true, "ratingKey": jsonx.AsStr(ratingKey), "partId": partID,
-			"subtitleStreamID": 0, "disabled": true}
+			"subtitleStreamID": 0, "disabled": true}, nil
 	}
 	partID, sid := resolveTrack(meta, Subtitle, language, streamID)
 	if partID == nil {
-		target := language + " subtitle"
 		if streamID != nil {
-			target = "subtitle stream id " + strconv.Itoa(*streamID)
+			return nil, output.Err(output.CodeTrackNotFound,
+				"no subtitle stream id "+strconv.Itoa(*streamID)+" track on "+ratingKey).
+				WithData("streamID", *streamID)
 		}
-		return jsonx.J{"ok": false, "error": "no " + target + " track on " + ratingKey}
+		return nil, output.Err(output.CodeTrackNotFound,
+			"no "+language+" subtitle track on "+ratingKey).
+			WithData("language", language)
 	}
 	api.Put("/library/parts/"+jsonx.AsStr(partID), url.Values{
 		"subtitleStreamID": {jsonx.AsStr(sid)},
 		"allParts":         {"1"},
 	})
-	return jsonx.J{"ok": true, "ratingKey": jsonx.AsStr(ratingKey), "partId": partID, "subtitleStreamID": sid}
+	return jsonx.J{"ok": true, "ratingKey": jsonx.AsStr(ratingKey), "partId": partID, "subtitleStreamID": sid}, nil
 }
 
 // --- bulk: set audio across a whole show -------------------------------------
@@ -345,13 +355,24 @@ func copyRow(row jsonx.J) jsonx.J {
 
 // ExecuteBulkAudio mirrors streams.execute_bulk_audio: PUT each non-skipped
 // plan row via TryPut; tolerate per-item failure.
-func ExecuteBulkAudio(plan []jsonx.J) []jsonx.J {
+//
+// Alongside the display-shaped results (unchanged: "status/error" per row,
+// preserved verbatim under WithData("results", …) by the caller on overall
+// failure), it returns a parallel slice of v2 error codes — one per row,
+// empty for rows that didn't fail — classified via api.Classify so the
+// command layer can tell a track-miss-shaped failure (the target part/track
+// vanished between planning and execution: HTTP 404) from a generic upstream
+// failure, per docs/error_model_v2.md §3's bulk-partial-failure rule, without
+// string-sniffing the human-readable error text.
+func ExecuteBulkAudio(plan []jsonx.J) ([]jsonx.J, []string) {
 	results := make([]jsonx.J, 0, len(plan))
+	codes := make([]string, 0, len(plan))
 	for _, row := range plan {
 		out := copyRow(row)
 		if jsonx.Truthy(row["skip"]) {
 			out["status"] = "skipped"
 			results = append(results, out)
+			codes = append(codes, "")
 			continue
 		}
 		_, err := api.TryPut("/library/parts/"+jsonx.AsStr(row["partId"]), url.Values{
@@ -359,12 +380,16 @@ func ExecuteBulkAudio(plan []jsonx.J) []jsonx.J {
 			"allParts":      {"1"},
 		})
 		if err != nil {
+			cli := api.Classify(api.AsError(err), api.TargetPMS)
 			out["status"] = "error"
-			out["error"] = err.Error() // *api.Error.Error() returns e.Message
+			out["error"] = cli.Message // same text as *api.Error.Error() (e.Message)
+			results = append(results, out)
+			codes = append(codes, cli.Code)
 		} else {
 			out["status"] = "ok"
+			results = append(results, out)
+			codes = append(codes, "")
 		}
-		results = append(results, out)
 	}
-	return results
+	return results, codes
 }

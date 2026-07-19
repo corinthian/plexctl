@@ -43,7 +43,7 @@ metadata chunk completes, so partial progress survives a killed caller.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			show := args[0]
 			if strings.TrimSpace(show) == "" {
-				output.Usage("show cannot be empty")
+				output.FailErr(output.Err(output.CodeBadRequest, "show cannot be empty"))
 				return nil
 			}
 			var seasonPtr *int
@@ -117,21 +117,21 @@ Single: --language (default eng) xor --stream-id. Bulk: --language, optional
 			bulk := showSet || showRKSet
 
 			if showSet && showRKSet {
-				output.Out(jsonx.J{"ok": false, "error": "--show and --show-rating-key are mutually exclusive"})
+				output.FailErr(output.Err(output.CodeBadRequest, "--show and --show-rating-key are mutually exclusive"))
 				return nil
 			}
 			if hasRatingKey && bulk {
-				output.Out(jsonx.J{"ok": false, "error": "provide RATING_KEY (single) or --show/--show-rating-key (bulk), not both"})
+				output.FailErr(output.Err(output.CodeBadRequest, "provide RATING_KEY (single) or --show/--show-rating-key (bulk), not both"))
 				return nil
 			}
 			if !hasRatingKey && !bulk {
-				output.Out(jsonx.J{"ok": false, "error": "provide RATING_KEY (single) or --show/--show-rating-key (bulk)"})
+				output.FailErr(output.Err(output.CodeBadRequest, "provide RATING_KEY (single) or --show/--show-rating-key (bulk)"))
 				return nil
 			}
 
 			if bulk {
 				if streamIDSet {
-					output.Out(jsonx.J{"ok": false, "error": "--stream-id is single-item only; not valid with --show"})
+					output.FailErr(output.Err(output.CodeBadRequest, "--stream-id is single-item only; not valid with --show"))
 					return nil
 				}
 				lang := language
@@ -146,24 +146,52 @@ Single: --language (default eng) xor --stream-id. Bulk: --language, optional
 				if showRKSet {
 					showRKPtr = &showRatingKey
 				}
-				output.Out(bulkSetAudio(show, showRKPtr, lang, seasonPtr, allSeasons, onlyNonEng, dryRun))
+				result, cliErr := bulkSetAudio(show, showRKPtr, lang, seasonPtr, allSeasons, onlyNonEng, dryRun)
+				if cliErr != nil {
+					output.FailErr(cliErr)
+					return nil
+				}
+				output.Out(result)
 				return nil
 			}
 
 			// single-item
+			//
+			// NOTE (P2-D scope note): unlike its five siblings above and its
+			// set-subtitle twin below, this guard is deliberately left on the
+			// legacy output.Out([...]) shape. docs/error_inventory.md's
+			// streams.go note names exactly six hand-rolled flag-validation
+			// sites as "wrongly exit 1" (3,4,5,6,11,12 in its table) — this
+			// site is table row 8, identical in kind and message pattern to
+			// row 12 (set-subtitle's --language/--stream-id guard) but is not
+			// among the six named in docs/error_model_v2.md §3's migration
+			// mapping. Exit code is unaffected either way (Out's falsy branch
+			// already exits 1, same as BAD_REQUEST would). Flagged in the P2-D
+			// report as a gap worth confirming rather than migrated on
+			// judgment call.
 			if languageSet && streamIDSet {
 				output.Out(jsonx.J{"ok": false, "error": "--language and --stream-id are mutually exclusive"})
 				return nil
 			}
 			if streamIDSet {
-				output.Out(streams.SetAudioStream(ratingKey, "", &streamID))
+				result, cliErr := streams.SetAudioStream(ratingKey, "", &streamID)
+				if cliErr != nil {
+					output.FailErr(cliErr)
+					return nil
+				}
+				output.Out(result)
 				return nil
 			}
 			lang := language
 			if lang == "" {
 				lang = "eng"
 			}
-			output.Out(streams.SetAudioStream(ratingKey, lang, nil))
+			result, cliErr := streams.SetAudioStream(ratingKey, lang, nil)
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
@@ -181,7 +209,11 @@ Single: --language (default eng) xor --stream-id. Bulk: --language, optional
 // bulkSetAudio mirrors cli._bulk_set_audio. D4 guards live here: --show
 // ambiguity resolves before enumeration; the season-scope guard is orthogonal
 // to resolution and applies to both --show and --show-rating-key.
-func bulkSetAudio(show string, showRatingKey *string, language string, season *int, allSeasons, onlyNonEng, dryRun bool) jsonx.J {
+//
+// On failure it returns a *output.CLIError (v2 coded contract); the command
+// layer forwards that to output.FailErr. Success maps (no episodes, dry-run,
+// clean bulk apply) are unchanged.
+func bulkSetAudio(show string, showRatingKey *string, language string, season *int, allSeasons, onlyNonEng, dryRun bool) (jsonx.J, *output.CLIError) {
 	var showKey any
 	var title any
 
@@ -198,10 +230,25 @@ func bulkSetAudio(show string, showRatingKey *string, language string, season *i
 			distinct[jsonx.AsStr(h["ratingKey"])] = true
 		}
 		if len(distinct) > 1 {
-			return jsonx.J{"ok": false, "error": fmt.Sprintf("ambiguous show %s — %d series match; pass --show-rating-key", jsonx.PyRepr(show), len(distinct))}
+			seen := map[string]bool{}
+			matches := make([]jsonx.J, 0, len(distinct))
+			for _, h := range hits {
+				rk := jsonx.AsStr(h["ratingKey"])
+				if seen[rk] {
+					continue
+				}
+				seen[rk] = true
+				matches = append(matches, jsonx.J{"title": h["title"], "ratingKey": rk})
+			}
+			return nil, output.Err(output.CodeShowAmbiguous,
+				fmt.Sprintf("ambiguous show %s — %d series match; pass --show-rating-key", jsonx.PyRepr(show), len(distinct))).
+				WithData("matches", matches).
+				WithHint("disambiguate with --show-rating-key KEY")
 		}
 		if len(hits) == 0 {
-			return jsonx.J{"ok": false, "error": fmt.Sprintf("no show found for: %s — pass --show-rating-key", jsonx.PyRepr(show))}
+			return nil, output.Err(output.CodeNotFound,
+				fmt.Sprintf("no show found for: %s — pass --show-rating-key", jsonx.PyRepr(show))).
+				WithData("query", show)
 		}
 		showKey = hits[0]["ratingKey"]
 		title = hits[0]["title"]
@@ -210,17 +257,26 @@ func bulkSetAudio(show string, showRatingKey *string, language string, season *i
 	episodes := library.EpisodesForShowKey(showKey, false, season)
 	if len(episodes) == 0 {
 		return jsonx.J{"ok": true, "count": 0, "results": []jsonx.J{},
-			"note": fmt.Sprintf("no episodes for show %s", jsonx.AsStr(showKey))}
+			"note": fmt.Sprintf("no episodes for show %s", jsonx.AsStr(showKey))}, nil
 	}
 
 	// Count only episodes that actually declare a season. An unparented episode
 	// coerced to 0 invents a Specials season that does not exist — inflating the
 	// count that gates this bulk write, and turning a single-season show into a
-	// spurious "spans 2 seasons" refusal.
+	// spurious "spans 2 seasons" refusal. Built in the same pass as the season
+	// breakdown so both the scope-required error and the success/dry-run
+	// results can reuse it.
 	seasonSet := map[int]bool{}
+	breakdown := jsonx.J{}
 	for _, e := range episodes {
 		if s, ok := library.SeasonOf(e); ok {
 			seasonSet[s] = true
+		}
+		k := jsonx.AsStr(e["parentIndex"])
+		if v, ok := breakdown[k]; ok {
+			breakdown[k] = v.(int) + 1
+		} else {
+			breakdown[k] = 1
 		}
 	}
 	seasons := make([]int, 0, len(seasonSet))
@@ -234,20 +290,14 @@ func bulkSetAudio(show string, showRatingKey *string, language string, season *i
 		if jsonx.Truthy(title) {
 			titleOrKey = jsonx.AsStr(title)
 		}
-		return jsonx.J{"ok": false, "error": fmt.Sprintf("%s spans %d seasons %s; pass --season N or --all-seasons",
-			jsonx.PyRepr(titleOrKey), len(seasons), formatIntList(seasons))}
+		return nil, output.Err(output.CodeScopeRequired,
+			fmt.Sprintf("%s spans %d seasons %s; pass --season N or --all-seasons",
+				jsonx.PyRepr(titleOrKey), len(seasons), formatIntList(seasons))).
+			WithData("seasons", breakdown).
+			WithHint("add --all-seasons, or narrow with --season N")
 	}
 
 	plan := streams.PlanBulkAudio(episodes, language, onlyNonEng)
-	breakdown := jsonx.J{}
-	for _, e := range episodes {
-		k := jsonx.AsStr(e["parentIndex"])
-		if v, ok := breakdown[k]; ok {
-			breakdown[k] = v.(int) + 1
-		} else {
-			breakdown[k] = 1
-		}
-	}
 	toApply := 0
 	for _, r := range plan {
 		if !jsonx.Truthy(r["skip"]) {
@@ -259,25 +309,43 @@ func bulkSetAudio(show string, showRatingKey *string, language string, season *i
 		return jsonx.J{
 			"ok": true, "dryRun": true, "show": title, "ratingKey": jsonx.AsStr(showKey),
 			"seasons": breakdown, "count": len(plan), "toApply": toApply, "plan": plan,
-		}
+		}, nil
 	}
 
-	results := streams.ExecuteBulkAudio(plan)
+	results, codes := streams.ExecuteBulkAudio(plan)
 	applied, failed, skipped := 0, 0, 0
-	for _, r := range results {
+	allTrackMiss := true
+	for i, r := range results {
 		switch r["status"] {
 		case "ok":
 			applied++
 		case "error":
 			failed++
+			if codes[i] != output.CodeNotFound {
+				allTrackMiss = false
+			}
 		case "skipped":
 			skipped++
 		}
 	}
-	return jsonx.J{
-		"ok": failed == 0, "show": title, "ratingKey": jsonx.AsStr(showKey),
-		"seasons": breakdown, "applied": applied, "skipped": skipped, "failed": failed, "results": results,
+	if failed > 0 {
+		// §3's resolved STOP-rule exception: if every per-episode PUT failure
+		// classified as a 404 (the target part/track vanished between
+		// planning and execution — the bulk-write analogue of a track miss),
+		// the aggregate reads as PLEX_TRACK_NOT_FOUND; any other failure
+		// shape (5xx, transport, etc.) reads as the generic PLEX_HTTP_ERROR.
+		// Either way the per-episode results array survives verbatim.
+		code := output.CodeHTTPError
+		if allTrackMiss {
+			code = output.CodeTrackNotFound
+		}
+		return nil, output.Err(code, fmt.Sprintf("%d of %d episodes failed to set audio", failed, applied+failed+skipped)).
+			WithData("results", results)
 	}
+	return jsonx.J{
+		"ok": true, "show": title, "ratingKey": jsonx.AsStr(showKey),
+		"seasons": breakdown, "applied": applied, "skipped": skipped, "failed": failed, "results": results,
+	}, nil
 }
 
 // --- set-subtitle --------------------------------------------------------
@@ -296,26 +364,41 @@ func newSetSubtitleCmd() *cobra.Command {
 			streamIDSet := cmd.Flags().Changed("stream-id")
 
 			if off && (languageSet || streamIDSet) {
-				output.Out(jsonx.J{"ok": false, "error": "--off and --language/--stream-id are mutually exclusive"})
+				output.FailErr(output.Err(output.CodeBadRequest, "--off and --language/--stream-id are mutually exclusive"))
 				return nil
 			}
 			if languageSet && streamIDSet {
-				output.Out(jsonx.J{"ok": false, "error": "--language and --stream-id are mutually exclusive"})
+				output.FailErr(output.Err(output.CodeBadRequest, "--language and --stream-id are mutually exclusive"))
 				return nil
 			}
 			if off {
-				output.Out(streams.SetSubtitleStream(ratingKey, "", nil, true))
+				result, cliErr := streams.SetSubtitleStream(ratingKey, "", nil, true)
+				if cliErr != nil {
+					output.FailErr(cliErr)
+					return nil
+				}
+				output.Out(result)
 				return nil
 			}
 			if streamIDSet {
-				output.Out(streams.SetSubtitleStream(ratingKey, "", &streamID, false))
+				result, cliErr := streams.SetSubtitleStream(ratingKey, "", &streamID, false)
+				if cliErr != nil {
+					output.FailErr(cliErr)
+					return nil
+				}
+				output.Out(result)
 				return nil
 			}
 			lang := language
 			if lang == "" {
 				lang = "eng"
 			}
-			output.Out(streams.SetSubtitleStream(ratingKey, lang, nil, false))
+			result, cliErr := streams.SetSubtitleStream(ratingKey, lang, nil, false)
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}

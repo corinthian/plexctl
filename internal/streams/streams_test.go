@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/streams"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
@@ -394,7 +395,10 @@ func TestSetAudioStreamByLanguage(t *testing.T) {
 		audioStream("eng", 2, false, false, ""),
 	))
 
-	out := streams.SetAudioStream("123", "eng", nil)
+	out, cliErr := streams.SetAudioStream("123", "eng", nil)
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v, want nil", cliErr)
+	}
 	if out["ok"] != true {
 		t.Fatalf("ok = %#v, want true: %#v", out["ok"], out)
 	}
@@ -417,7 +421,10 @@ func TestSetAudioStreamByStreamID(t *testing.T) {
 		audioStream("jpn", 6, false, false, ""),
 	))
 
-	out := streams.SetAudioStream("123", "", intPtr(6))
+	out, cliErr := streams.SetAudioStream("123", "", intPtr(6))
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v, want nil", cliErr)
+	}
 	if out["ok"] != true || out["audioStreamID"] != json.Number("6") {
 		t.Fatalf("out = %#v, want ok=true audioStreamID=6", out)
 	}
@@ -435,7 +442,10 @@ func TestSetAudioStreamIDPrecedenceOverLanguage(t *testing.T) {
 		audioStream("eng", 2, false, false, ""),
 	))
 
-	out := streams.SetAudioStream("123", "deu", intPtr(2))
+	out, cliErr := streams.SetAudioStream("123", "deu", intPtr(2))
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v, want nil", cliErr)
+	}
 	if out["audioStreamID"] != json.Number("2") {
 		t.Fatalf("audioStreamID = %#v, want 2 (streamID beats language)", out["audioStreamID"])
 	}
@@ -453,7 +463,10 @@ func TestSetAudioStreamIDStringNumberEquivalence(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFakePMS(t)
 			f.addMeta("123", meta("123", 900, audioStream("eng", c.id, false, false, "")))
-			out := streams.SetAudioStream("123", "", intPtr(6))
+			out, cliErr := streams.SetAudioStream("123", "", intPtr(6))
+			if cliErr != nil {
+				t.Fatalf("cliErr = %#v, want nil", cliErr)
+			}
 			if out["ok"] != true {
 				t.Fatalf("out = %#v, want ok=true for id repr %v", out, c.id)
 			}
@@ -465,12 +478,21 @@ func TestSetAudioStreamMissingLanguageErrorExact(t *testing.T) {
 	f := newFakePMS(t)
 	f.addMeta("123", meta("123", 900, audioStream("deu", 1, false, false, "")))
 
-	out := streams.SetAudioStream("123", "eng", nil)
-	if out["ok"] != false {
-		t.Fatalf("ok = %#v, want false", out["ok"])
+	out, cliErr := streams.SetAudioStream("123", "eng", nil)
+	if out != nil {
+		t.Fatalf("out = %#v, want nil on failure", out)
 	}
-	if out["error"] != "no eng audio track on 123" {
-		t.Fatalf("error = %q, want exact %q", out["error"], "no eng audio track on 123")
+	if cliErr == nil {
+		t.Fatalf("cliErr = nil, want a track-not-found error")
+	}
+	if cliErr.Code != output.CodeTrackNotFound {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeTrackNotFound)
+	}
+	if cliErr.Message != "no eng audio track on 123" {
+		t.Fatalf("message = %q, want exact %q", cliErr.Message, "no eng audio track on 123")
+	}
+	if cliErr.Data["language"] != "eng" {
+		t.Fatalf("data[language] = %#v, want %q", cliErr.Data["language"], "eng")
 	}
 	if n := len(f.callsWhere(isPartsPUT)); n != 0 {
 		t.Fatalf("PUT calls = %d, want 0", n)
@@ -481,17 +503,29 @@ func TestSetAudioStreamMissingStreamIDErrorExact(t *testing.T) {
 	f := newFakePMS(t)
 	f.addMeta("123", meta("123", 900, audioStream("eng", 1, false, false, "")))
 
-	out := streams.SetAudioStream("123", "", intPtr(99))
-	if out["error"] != "no audio stream id 99 track on 123" {
-		t.Fatalf("error = %q, want exact %q", out["error"], "no audio stream id 99 track on 123")
+	_, cliErr := streams.SetAudioStream("123", "", intPtr(99))
+	if cliErr == nil {
+		t.Fatalf("cliErr = nil, want a track-not-found error")
+	}
+	if cliErr.Code != output.CodeTrackNotFound {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeTrackNotFound)
+	}
+	if cliErr.Message != "no audio stream id 99 track on 123" {
+		t.Fatalf("message = %q, want exact %q", cliErr.Message, "no audio stream id 99 track on 123")
+	}
+	if cliErr.Data["streamID"] != 99 {
+		t.Fatalf("data[streamID] = %#v, want 99", cliErr.Data["streamID"])
 	}
 }
 
 func TestSetAudioStreamNoMetadataErrorExact(t *testing.T) {
 	newFakePMS(t) // "999" never registered -> library.Metadata returns {}
-	out := streams.SetAudioStream("999", "eng", nil)
-	if out["ok"] != false || out["error"] != "no metadata for ratingKey 999" {
-		t.Fatalf("out = %#v, want ok=false error=%q", out, "no metadata for ratingKey 999")
+	out, cliErr := streams.SetAudioStream("999", "eng", nil)
+	if out != nil {
+		t.Fatalf("out = %#v, want nil on failure", out)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeNotFound || cliErr.Message != "no metadata for ratingKey 999" {
+		t.Fatalf("cliErr = %#v, want code=%q message=%q", cliErr, output.CodeNotFound, "no metadata for ratingKey 999")
 	}
 }
 
@@ -501,7 +535,10 @@ func TestSetSubtitleStreamOff(t *testing.T) {
 	f := newFakePMS(t)
 	f.addMeta("123", meta("123", 900, subtitleStream("eng", 3)))
 
-	out := streams.SetSubtitleStream("123", "", nil, true)
+	out, cliErr := streams.SetSubtitleStream("123", "", nil, true)
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v, want nil", cliErr)
+	}
 	if out["ok"] != true || out["disabled"] != true {
 		t.Fatalf("out = %#v, want ok=true disabled=true", out)
 	}
@@ -517,7 +554,10 @@ func TestSetSubtitleStreamOff(t *testing.T) {
 func TestSetSubtitleStreamByLanguage(t *testing.T) {
 	newFakePMS(t).addMeta("123", meta("123", 900, subtitleStream("eng", 3), subtitleStream("spa", 4)))
 
-	out := streams.SetSubtitleStream("123", "spa", nil, false)
+	out, cliErr := streams.SetSubtitleStream("123", "spa", nil, false)
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v, want nil", cliErr)
+	}
 	if out["ok"] != true || out["subtitleStreamID"] != json.Number("4") {
 		t.Fatalf("out = %#v, want ok=true subtitleStreamID=4", out)
 	}
@@ -526,7 +566,10 @@ func TestSetSubtitleStreamByLanguage(t *testing.T) {
 func TestSetSubtitleStreamByStreamID(t *testing.T) {
 	newFakePMS(t).addMeta("123", meta("123", 900, subtitleStream("eng", 3), subtitleStream("spa", 4)))
 
-	out := streams.SetSubtitleStream("123", "", intPtr(3), false)
+	out, cliErr := streams.SetSubtitleStream("123", "", intPtr(3), false)
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v, want nil", cliErr)
+	}
 	if out["ok"] != true || out["subtitleStreamID"] != json.Number("3") {
 		t.Fatalf("out = %#v, want ok=true subtitleStreamID=3", out)
 	}
@@ -536,9 +579,18 @@ func TestSetSubtitleStreamMissingLanguageErrorExact(t *testing.T) {
 	f := newFakePMS(t)
 	f.addMeta("123", meta("123", 900, subtitleStream("eng", 3)))
 
-	out := streams.SetSubtitleStream("123", "spa", nil, false)
-	if out["error"] != "no spa subtitle track on 123" {
-		t.Fatalf("error = %q, want exact %q", out["error"], "no spa subtitle track on 123")
+	_, cliErr := streams.SetSubtitleStream("123", "spa", nil, false)
+	if cliErr == nil {
+		t.Fatalf("cliErr = nil, want a track-not-found error")
+	}
+	if cliErr.Code != output.CodeTrackNotFound {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeTrackNotFound)
+	}
+	if cliErr.Message != "no spa subtitle track on 123" {
+		t.Fatalf("message = %q, want exact %q", cliErr.Message, "no spa subtitle track on 123")
+	}
+	if cliErr.Data["language"] != "spa" {
+		t.Fatalf("data[language] = %#v, want %q", cliErr.Data["language"], "spa")
 	}
 }
 
@@ -546,9 +598,18 @@ func TestSetSubtitleStreamMissingStreamIDErrorExact(t *testing.T) {
 	f := newFakePMS(t)
 	f.addMeta("123", meta("123", 900, subtitleStream("eng", 3)))
 
-	out := streams.SetSubtitleStream("123", "", intPtr(42), false)
-	if out["error"] != "no subtitle stream id 42 track on 123" {
-		t.Fatalf("error = %q, want exact %q", out["error"], "no subtitle stream id 42 track on 123")
+	_, cliErr := streams.SetSubtitleStream("123", "", intPtr(42), false)
+	if cliErr == nil {
+		t.Fatalf("cliErr = nil, want a track-not-found error")
+	}
+	if cliErr.Code != output.CodeTrackNotFound {
+		t.Fatalf("code = %q, want %q", cliErr.Code, output.CodeTrackNotFound)
+	}
+	if cliErr.Message != "no subtitle stream id 42 track on 123" {
+		t.Fatalf("message = %q, want exact %q", cliErr.Message, "no subtitle stream id 42 track on 123")
+	}
+	if cliErr.Data["streamID"] != 42 {
+		t.Fatalf("data[streamID] = %#v, want 42", cliErr.Data["streamID"])
 	}
 }
 
@@ -556,17 +617,23 @@ func TestSetSubtitleStreamOffNoMediaPart(t *testing.T) {
 	f := newFakePMS(t)
 	f.addMeta("123", jsonx.J{"ratingKey": "123"}) // non-empty meta, no Media
 
-	out := streams.SetSubtitleStream("123", "", nil, true)
-	if out["ok"] != false || out["error"] != "no media part on 123" {
-		t.Fatalf("out = %#v, want ok=false error=%q", out, "no media part on 123")
+	out, cliErr := streams.SetSubtitleStream("123", "", nil, true)
+	if out != nil {
+		t.Fatalf("out = %#v, want nil on failure", out)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeTrackNotFound || cliErr.Message != "no media part on 123" {
+		t.Fatalf("cliErr = %#v, want code=%q message=%q", cliErr, output.CodeTrackNotFound, "no media part on 123")
 	}
 }
 
 func TestSetSubtitleStreamNoMetadataErrorExact(t *testing.T) {
 	newFakePMS(t)
-	out := streams.SetSubtitleStream("999", "eng", nil, false)
-	if out["ok"] != false || out["error"] != "no metadata for ratingKey 999" {
-		t.Fatalf("out = %#v, want no-metadata error", out)
+	out, cliErr := streams.SetSubtitleStream("999", "eng", nil, false)
+	if out != nil {
+		t.Fatalf("out = %#v, want nil on failure", out)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeNotFound || cliErr.Message != "no metadata for ratingKey 999" {
+		t.Fatalf("cliErr = %#v, want code=%q message=%q", cliErr, output.CodeNotFound, "no metadata for ratingKey 999")
 	}
 }
 
@@ -653,9 +720,12 @@ func TestExecuteBulkAudioSkippedRowsNeverPut(t *testing.T) {
 	plan := []jsonx.J{
 		{"ratingKey": "10", "partId": float64(500), "toStreamId": float64(2), "skip": true, "reason": "already preferred"},
 	}
-	results := streams.ExecuteBulkAudio(plan)
+	results, codes := streams.ExecuteBulkAudio(plan)
 	if results[0]["status"] != "skipped" {
 		t.Fatalf("status = %#v, want skipped", results[0]["status"])
+	}
+	if codes[0] != "" {
+		t.Fatalf("codes[0] = %q, want empty for a skipped row", codes[0])
 	}
 	if n := len(f.callsWhere(isPartsPUT)); n != 0 {
 		t.Fatalf("PUT calls = %d, want 0 for a skipped row", n)
@@ -670,7 +740,7 @@ func TestExecuteBulkAudioPerItemFailureTolerance(t *testing.T) {
 		{"ratingKey": "11", "partId": float64(501), "toStreamId": float64(2), "skip": false},
 	}
 
-	results := streams.ExecuteBulkAudio(plan)
+	results, codes := streams.ExecuteBulkAudio(plan)
 	if results[0]["status"] != "error" {
 		t.Fatalf("results[0].status = %#v, want error", results[0]["status"])
 	}
@@ -678,14 +748,43 @@ func TestExecuteBulkAudioPerItemFailureTolerance(t *testing.T) {
 	if !strings.HasPrefix(errMsg, "HTTP 500:") {
 		t.Fatalf("results[0].error = %q, want HTTP 500: prefix", errMsg)
 	}
+	// A 500 classifies to PLEX_SERVER_ERROR (api.Classify), not a track miss —
+	// this is the "else CodeHTTPError" branch's raw material at the caller.
+	if codes[0] != output.CodeServerError {
+		t.Fatalf("codes[0] = %q, want %q", codes[0], output.CodeServerError)
+	}
 	if results[1]["status"] != "ok" {
 		t.Fatalf("results[1].status = %#v, want ok", results[1]["status"])
+	}
+	if codes[1] != "" {
+		t.Fatalf("codes[1] = %q, want empty for a successful row", codes[1])
 	}
 	for _, c := range f.callsWhere(isPartsPUT) {
 		if c.query.Get("allParts") != "1" {
 			t.Fatalf("PUT %s allParts = %q, want 1", c.path, c.query.Get("allParts"))
 		}
 	}
+}
+
+// A PUT that 404s (the target part/track vanished between planning and
+// execution) classifies to CodeNotFound — the signal bulkSetAudio's caller
+// uses to read an all-such-failures bulk result as PLEX_TRACK_NOT_FOUND
+// rather than the generic PLEX_HTTP_ERROR.
+func TestExecuteBulkAudioPutNotFoundClassifiesAsTrackMissSignal(t *testing.T) {
+	f := newFakePMS(t)
+	f.enqueuePutStatus(404)
+	plan := []jsonx.J{
+		{"ratingKey": "10", "partId": float64(500), "toStreamId": float64(2), "skip": false},
+	}
+
+	results, codes := streams.ExecuteBulkAudio(plan)
+	if results[0]["status"] != "error" {
+		t.Fatalf("results[0].status = %#v, want error", results[0]["status"])
+	}
+	if codes[0] != output.CodeNotFound {
+		t.Fatalf("codes[0] = %q, want %q", codes[0], output.CodeNotFound)
+	}
+	_ = f
 }
 
 func TestExecuteBulkAudioDoesNotMutateInput(t *testing.T) {
