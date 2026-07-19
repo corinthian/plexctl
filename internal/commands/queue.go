@@ -57,9 +57,29 @@ func newQueueCmd() *cobra.Command {
 		// The queue exists on the server the moment Create succeeded. Surface
 		// its IDs so a bind failure leaves a queue the caller can see and
 		// recover, not an orphan. clientUnreachable flags a transport-shaped
-		// bind failure (device didn't answer), never an HTTP-error bind. The
-		// success path stays byte-identical.
+		// bind failure (device didn't answer), never an HTTP-error bind.
 		queue.AnnotateBind(result, jsonx.AsStr(q["playQueueID"]), jsonx.AsStr(q["selectedItemID"]))
+		bound := jsonx.Truthy(result["ok"])
+		if bound {
+			// An accepted bind proves the device answered, not that the app
+			// engaged (the Companion listener can 200 commands the app never
+			// acts on). Confirm against sessions before claiming success.
+			// Without --shuffle the engaged item must be the first key; with
+			// it, whichever queued key PMS picked counts. clientEngaged is
+			// always present after a bind so a consumer can tell a verified
+			// success from a pre-verification build's bare ok:true.
+			expected := args[:1]
+			if shuffle {
+				expected = args
+			}
+			if queue.ConfirmEngaged(target, expected) {
+				result["clientEngaged"] = true
+			} else {
+				result["ok"] = false
+				result["clientEngaged"] = false
+				result["error"] = "device accepted the playback command but playback never started"
+			}
+		}
 		if mid := target["machineIdentifier"]; jsonx.Truthy(mid) {
 			midStr := jsonx.AsStr(mid)
 			qid := jsonx.AsStr(q["playQueueID"])
@@ -97,6 +117,17 @@ func newQueueCmd() *cobra.Command {
 				}
 			}
 		}
+		if bound && !jsonx.Truthy(result["ok"]) {
+			// Engagement failure: which retry helps depends on the staging
+			// outcome above (staged queue → queue-start recovers it; an
+			// existing entry was preserved → only a fresh queue re-binds),
+			// so the guidance is appended after that block has run.
+			recovery := "re-run `queue`"
+			if jsonx.Truthy(result["staged"]) {
+				recovery = "run `queue-start`"
+			}
+			result["error"] = jsonx.AsStr(result["error"]) + "; retrying now will not help — relaunch the Plex app on the device, then " + recovery
+		}
 		output.Out(result)
 		return nil
 	}
@@ -114,7 +145,21 @@ func newQueueStartCmd() *cobra.Command {
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		// Binding needs a live client with a baseurl, so use the full resolver.
-		output.Out(queue.Start(clients.Resolve(*client)))
+		target := clients.Resolve(*client)
+		result := queue.Start(target)
+		if jsonx.Truthy(result["ok"]) {
+			// Same accepted-vs-engaged gap as queue. The queue's own items
+			// (fetched best-effort) scope the match; a fetch failure degrades
+			// to any non-idle session on the client.
+			if queue.ConfirmEngaged(target, queue.ItemRatingKeys(jsonx.AsStr(result["playQueueID"]))) {
+				result["clientEngaged"] = true
+			} else {
+				result["ok"] = false
+				result["clientEngaged"] = false
+				result["error"] = "device accepted the playback command but playback never started; retrying now will not help — relaunch the Plex app on the device, then run `queue-start` again"
+			}
+		}
+		output.Out(result)
 		return nil
 	}
 	return cmd

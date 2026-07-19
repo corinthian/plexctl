@@ -11,8 +11,20 @@ import (
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/commands"
+	"github.com/corinthian/plexctl/internal/queue"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
+
+// fastVerify compresses ConfirmEngaged's polling window so wedge-shaped
+// tests (bind accepted, client never engages) don't sit through the real
+// 12-probe sleep schedule.
+func fastVerify(t *testing.T) {
+	t.Helper()
+	oldProbes, oldSleep := queue.VerifyProbes, queue.VerifySleep
+	queue.VerifyProbes = 2
+	queue.VerifySleep = func(time.Duration) {}
+	t.Cleanup(func() { queue.VerifyProbes, queue.VerifySleep = oldProbes, oldSleep })
+}
 
 // stagedEntry reads the persisted queue-state entry for the fake's default
 // Apple TV client (mid-appletv), asserting it was written.
@@ -41,6 +53,7 @@ func TestQueueSavesQueueState(t *testing.T) {
 		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
 	})
 	f.onStatus("GET", "/player/playback/playMedia", 200)
+	f.onSessions("playing", "123")
 
 	root := commands.BuildRoot()
 	root.SetArgs([]string{"queue", "123"})
@@ -51,6 +64,9 @@ func TestQueueSavesQueueState(t *testing.T) {
 	got := mustUnmarshal(t, out)
 	if got["ok"] != true {
 		t.Fatalf("ok = %#v, out=%s", got["ok"], out)
+	}
+	if got["clientEngaged"] != true {
+		t.Fatalf("clientEngaged = %#v, want true; out=%s", got["clientEngaged"], out)
 	}
 
 	raw, err := os.ReadFile(filepath.Join(f.dir, "queue_state.json"))
@@ -82,6 +98,7 @@ func TestQueueBindSuccessReadOnlyConfigDirReportsStateSavedFalse(t *testing.T) {
 		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
 	})
 	f.onStatus("GET", "/player/playback/playMedia", 200)
+	f.onSessions("playing", "123")
 
 	if err := os.Chmod(f.dir, 0o500); err != nil {
 		t.Fatal(err)
@@ -334,6 +351,7 @@ func TestQueueBindSuccessOverwritesExistingEntry(t *testing.T) {
 		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
 	})
 	f.onStatus("GET", "/player/playback/playMedia", 200)
+	f.onSessions("playing", "123")
 
 	root := commands.BuildRoot()
 	root.SetArgs([]string{"queue", "123"})
@@ -365,6 +383,158 @@ func TestQueueStartCommandNoStateReturnsNoActiveQueue(t *testing.T) {
 	got := mustUnmarshal(t, out)
 	if got["ok"] != false || got["error"] != "no active queue on Apple TV" {
 		t.Fatalf("got %#v", got)
+	}
+}
+
+// Wedge (incidents 2026-07-05/13): the Companion listener 200s the bind but
+// the app never engages — sessions stay empty. `queue` must not claim
+// success; the new queue stages (no prior entry) and the error says a plain
+// retry won't help and names queue-start as the recovery.
+func TestQueueEngagementFailureStagesAndAdvisesQueueStart(t *testing.T) {
+	f := newFakePMS(t)
+	fastVerify(t)
+	f.resolvableClient(t)
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onJSON("POST", "/playQueues", map[string]any{
+		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
+	})
+	f.onStatus("GET", "/player/playback/playMedia", 200)
+	f.onSessionsIdle()
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue", "123"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 (engagement failure); out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != false || got["clientEngaged"] != false {
+		t.Fatalf("ok/clientEngaged = %#v/%#v, want false/false; out=%s", got["ok"], got["clientEngaged"], out)
+	}
+	if got["staged"] != true {
+		t.Fatalf("staged = %#v, want true (fresh queue, no prior entry); out=%s", got["staged"], out)
+	}
+	errStr, _ := got["error"].(string)
+	if !strings.Contains(errStr, "retrying now will not help") || !strings.Contains(errStr, "queue-start") {
+		t.Fatalf("error = %q, want no-retry guidance naming queue-start", errStr)
+	}
+	if entry := stagedEntry(t, f); entry["playQueueID"] != "555" {
+		t.Fatalf("staged entry = %#v", entry)
+	}
+}
+
+// A session playing something ELSE on the client must not count as
+// engagement (stale-session hazard), and with an existing persisted entry
+// the new queue is not staged — so the guidance must name re-running
+// `queue`, not queue-start (which would rebind the old queue).
+func TestQueueEngagementFailurePreservesEntryAdvisesRequeue(t *testing.T) {
+	f := newFakePMS(t)
+	fastVerify(t)
+	f.resolvableClient(t)
+	seed := map[string]any{"mid-appletv": map[string]any{
+		"playQueueID": "111", "selectedItemID": "222", "savedAt": float64(1),
+	}}
+	seedBytes, _ := json.Marshal(seed)
+	if err := os.WriteFile(filepath.Join(f.dir, "queue_state.json"), seedBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onJSON("POST", "/playQueues", map[string]any{
+		"MediaContainer": map[string]any{"playQueueID": "555", "playQueueSelectedItemID": "999"},
+	})
+	f.onStatus("GET", "/player/playback/playMedia", 200)
+	f.onSessions("playing", "888") // old content, not the queued key 123
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue", "123"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != false || got["clientEngaged"] != false {
+		t.Fatalf("ok/clientEngaged = %#v/%#v, want false/false; out=%s", got["ok"], got["clientEngaged"], out)
+	}
+	if _, present := got["staged"]; present {
+		t.Fatalf("staged must be absent when an existing entry was preserved: %#v", got)
+	}
+	errStr, _ := got["error"].(string)
+	if !strings.Contains(errStr, "retrying now will not help") || !strings.Contains(errStr, "re-run `queue`") {
+		t.Fatalf("error = %q, want no-retry guidance naming re-run `queue`", errStr)
+	}
+	if entry := stagedEntry(t, f); entry["playQueueID"] != "111" {
+		t.Fatalf("existing entry was clobbered: %#v", entry)
+	}
+}
+
+// queue-start has the identical accepted-vs-engaged gap. On a wedge it must
+// flip to ok:false with guidance to relaunch the app and run queue-start
+// again; the persisted entry stays for that retry.
+func TestQueueStartEngagementFailure(t *testing.T) {
+	f := newFakePMS(t)
+	fastVerify(t)
+	f.resolvableClient(t)
+	seed := map[string]any{"mid-appletv": map[string]any{
+		"playQueueID": "111", "selectedItemID": "222", "savedAt": float64(1),
+	}}
+	seedBytes, _ := json.Marshal(seed)
+	if err := os.WriteFile(filepath.Join(f.dir, "queue_state.json"), seedBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onStatus("GET", "/player/playback/playMedia", 200)
+	f.onJSON("GET", "/playQueues/111", map[string]any{
+		"MediaContainer": map[string]any{"Metadata": []any{map[string]any{"ratingKey": "777"}}},
+	})
+	f.onSessionsIdle()
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue-start"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != false || got["clientEngaged"] != false {
+		t.Fatalf("ok/clientEngaged = %#v/%#v, want false/false; out=%s", got["ok"], got["clientEngaged"], out)
+	}
+	errStr, _ := got["error"].(string)
+	if !strings.Contains(errStr, "retrying now will not help") || !strings.Contains(errStr, "`queue-start` again") {
+		t.Fatalf("error = %q, want relaunch-then-queue-start-again guidance", errStr)
+	}
+	if entry := stagedEntry(t, f); entry["playQueueID"] != "111" {
+		t.Fatalf("entry must survive for the retry: %#v", entry)
+	}
+}
+
+// queue-start success: engagement is scoped to the queue's own items
+// (fetched from PMS), and a verified bind carries clientEngaged:true.
+func TestQueueStartEngagedSuccess(t *testing.T) {
+	f := newFakePMS(t)
+	f.resolvableClient(t)
+	seed := map[string]any{"mid-appletv": map[string]any{
+		"playQueueID": "111", "selectedItemID": "222", "savedAt": float64(1),
+	}}
+	seedBytes, _ := json.Marshal(seed)
+	if err := os.WriteFile(filepath.Join(f.dir, "queue_state.json"), seedBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.onJSON("GET", "/", map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "srv-1"}})
+	f.onStatus("GET", "/player/playback/playMedia", 200)
+	f.onJSON("GET", "/playQueues/111", map[string]any{
+		"MediaContainer": map[string]any{"Metadata": []any{map[string]any{"ratingKey": "777"}}},
+	})
+	f.onSessions("playing", "777")
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"queue-start"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+	if code != -1 {
+		t.Fatalf("exit = %d, want -1; out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != true || got["clientEngaged"] != true {
+		t.Fatalf("ok/clientEngaged = %#v/%#v, want true/true; out=%s", got["ok"], got["clientEngaged"], out)
 	}
 }
 

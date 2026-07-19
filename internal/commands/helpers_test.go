@@ -176,6 +176,28 @@ func (f *fakePMS) inactiveClient(t *testing.T) {
 	})
 }
 
+// onSessions wires /status/sessions with one session for the fake's default
+// Apple TV client (mid-appletv) in the given state on the given ratingKey —
+// what ConfirmEngaged polls after an accepted bind.
+func (f *fakePMS) onSessions(state, ratingKey string) {
+	f.onJSON("GET", "/status/sessions", map[string]any{
+		"MediaContainer": map[string]any{
+			"Metadata": []any{
+				map[string]any{
+					"ratingKey": ratingKey,
+					"Player":    map[string]any{"machineIdentifier": "mid-appletv", "state": state},
+				},
+			},
+		},
+	})
+}
+
+// onSessionsIdle wires /status/sessions with no sessions at all — the wedge
+// shape: bind accepted, client never engages.
+func (f *fakePMS) onSessionsIdle() {
+	f.onJSON("GET", "/status/sessions", map[string]any{"MediaContainer": map[string]any{}})
+}
+
 // --- small assertion helpers --------------------------------------------------
 
 func trimNL(s string) string {
