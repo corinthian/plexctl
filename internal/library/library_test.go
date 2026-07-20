@@ -898,6 +898,51 @@ func TestListSectionMissingCountersTreatedAsWatchedNothing(t *testing.T) {
 	}
 }
 
+// TestListSectionShowRowWithDurationGetsDurationNominal pins the v2
+// success-side invariant (docs/error_model_v2.md §6): a show row carrying a
+// `duration` gets `durationNominal: true` flagged onto it, because a show's
+// `duration` is PMS's per-episode nominal runtime, not a real total.
+func TestListSectionShowRowWithDurationGetsDurationNominal(t *testing.T) {
+	f := newFakePMS(t)
+	show := jsonx.J{"ratingKey": "2002", "title": "The Simpsons", "type": "show",
+		"leafCount": 6.0, "viewedLeafCount": 2.0, "duration": 1320000.0}
+	f.onJSON("/library/sections/3/all", metaResp(show))
+
+	rows := library.ListSection("3", "show", false, "")
+	row := rows[0]
+	if row["durationNominal"] != true {
+		t.Fatalf("durationNominal = %#v, want true; row=%#v", row["durationNominal"], row)
+	}
+}
+
+// TestListSectionShowRowWithoutDurationOmitsDurationNominal pins the
+// negative case: a show row with no duration at all does not grow the key.
+func TestListSectionShowRowWithoutDurationOmitsDurationNominal(t *testing.T) {
+	f := newFakePMS(t)
+	show := jsonx.J{"ratingKey": "2003", "title": "No Duration Show", "type": "show",
+		"leafCount": 6.0, "viewedLeafCount": 2.0}
+	f.onJSON("/library/sections/3/all", metaResp(show))
+
+	rows := library.ListSection("3", "show", false, "")
+	if _, ok := rows[0]["durationNominal"]; ok {
+		t.Fatalf("row grew durationNominal without a duration: %#v", rows[0])
+	}
+}
+
+// TestListSectionMovieRowWithDurationOmitsDurationNominal pins the v2
+// invariant's scope: movie rows are unchanged even when they carry
+// `duration` — only show-level rows get the flag.
+func TestListSectionMovieRowWithDurationOmitsDurationNominal(t *testing.T) {
+	f := newFakePMS(t)
+	movie := jsonx.J{"ratingKey": "10", "title": "M", "type": "movie", "viewCount": 0.0, "duration": 7200000.0}
+	f.onJSON("/library/sections/1/all", metaResp(movie))
+
+	rows := library.ListSection("1", "movie", false, "")
+	if _, ok := rows[0]["durationNominal"]; ok {
+		t.Fatalf("movie row grew durationNominal: %#v", rows[0])
+	}
+}
+
 func TestListSectionTypeAndSortParams(t *testing.T) {
 	f := newFakePMS(t)
 	f.onJSON("/library/sections/3/all", metaResp())

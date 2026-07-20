@@ -1,0 +1,3 @@
+10:53:50 | search --json rocky
+10:54:01 | play-media 71979
+10:54:05 | metadata 71979

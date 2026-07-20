@@ -33,6 +33,7 @@ import (
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 )
 
 // CompanionTransportError mirrors playback.CompanionTransportError.
@@ -190,31 +191,33 @@ func companionGet(client jsonx.J, path string, params url.Values) (*http.Respons
 
 // classifyTransportErr mirrors _player_cmd's exception ladder: a connect
 // timeout must classify as a timeout before the generic connection-failed
-// branch (ConnectTimeout subclasses both in requests).
-func classifyTransportErr(err error) jsonx.J {
+// branch (ConnectTimeout subclasses both in requests). Returns an *api.Error
+// so playerCmd can hand it straight to api.Classify — the v2 chokepoint for
+// turning a transport shape into a coded CLIError (docs/error_model_v2.md
+// §3's "playerCmd's three transport-error maps ... via api.Classify"). Kind
+// carries through for parity with api.go's own classifyTransport even though
+// api.Classify(_, TargetClient) doesn't currently branch on it; Message uses
+// api.SanitizeError so no query string (which can carry the token) ever
+// reaches the envelope.
+func classifyTransportErr(err error) *api.Error {
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
-		return jsonx.J{"ok": false, "error": "request timed out: " + api.SanitizeError(err)}
+		return &api.Error{Message: "request timed out: " + api.SanitizeError(err), Kind: "timeout"}
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) {
-		return jsonx.J{"ok": false, "error": "connection failed: " + api.SanitizeError(err)}
+		return &api.Error{Message: "connection failed: " + api.SanitizeError(err), Kind: "error"}
 	}
-	return jsonx.J{"ok": false, "error": "request failed: " + api.SanitizeError(err)}
+	return &api.Error{Message: "request failed: " + api.SanitizeError(err), Kind: "error"}
 }
 
-// IsTransportError reports whether an error string carries one of the two
-// transport-shaped prefixes classifyTransportErr produces when the client
-// itself didn't answer (timed out or refused), as opposed to an HTTP status
-// error from a reachable client. Callers use it to set clientUnreachable only
-// when the device is genuinely unreachable — never for a 4xx/5xx bind.
-func IsTransportError(errStr string) bool {
-	return strings.HasPrefix(errStr, "request timed out") || strings.HasPrefix(errStr, "connection failed")
-}
-
-// playerCmd mirrors _player_cmd: fire-and-report Companion command, always
-// returning an {"ok": ...} dict rather than raising.
-func playerCmd(client jsonx.J, path string, extra map[string]string) jsonx.J {
+// playerCmd mirrors _player_cmd: fire-and-report Companion command. v2
+// (docs/error_model_v2.md §3, transport.go row): a transport-shaped failure
+// classifies via api.Classify(_, api.TargetClient) — CodeClientUnreachable,
+// exit 3, wake-the-device hint; an HTTP >= 400 response from the client
+// itself becomes CodeHTTPError carrying the status. Success still returns a
+// plain {"ok": true} result.
+func playerCmd(client jsonx.J, path string, extra map[string]string) (jsonx.J, *output.CLIError) {
 	params := url.Values{}
 	params.Set("commandID", strconv.FormatInt(nextCommandID(), 10))
 	params.Set("type", "video")
@@ -224,13 +227,14 @@ func playerCmd(client jsonx.J, path string, extra map[string]string) jsonx.J {
 
 	resp, body, err := companionGet(client, path, params)
 	if err != nil {
-		return classifyTransportErr(err)
+		return nil, api.Classify(classifyTransportErr(err), api.TargetClient)
 	}
 	// raise_for_status() only raises on 4xx/5xx -- 3xx is not an error.
 	if resp.StatusCode >= 400 {
-		return jsonx.J{"ok": false, "error": api.FormatHTTPError(resp.StatusCode, resp.Header.Get("Content-Type"), string(body), http.StatusText(resp.StatusCode))}
+		msg := api.FormatHTTPError(resp.StatusCode, resp.Header.Get("Content-Type"), string(body), http.StatusText(resp.StatusCode))
+		return nil, output.Err(output.CodeHTTPError, msg).WithHTTPStatus(resp.StatusCode)
 	}
-	return jsonx.J{"ok": true}
+	return jsonx.J{"ok": true}, nil
 }
 
 // PlayerGet mirrors playback._player_get: GET from the client's Companion
@@ -311,19 +315,67 @@ func GetServerMachineID() string {
 	return ""
 }
 
-// Transport commands mirror their Python namesakes.
-func Play(client jsonx.J) jsonx.J  { return playerCmd(client, "/player/playback/play", nil) }
-func Pause(client jsonx.J) jsonx.J { return playerCmd(client, "/player/playback/pause", nil) }
-func Stop(client jsonx.J) jsonx.J  { return playerCmd(client, "/player/playback/stop", nil) }
-func StepForward(client jsonx.J) jsonx.J {
+// EngagePollDelay paces Play's idle-play engagement poll (v2 NOT_APPLIED
+// invariant, docs/error_model_v2.md §5). Exported — unlike the paused-dance
+// `sleep` seam above, the idle-play golden lives in package commands_test
+// (internal/commands), a different package, so it needs its own settable
+// var rather than reusing an unexported one; production never overrides it.
+var EngagePollDelay = time.Second
+
+// Play mirrors playback.play, with the v2 idle-play invariant layered on
+// top (contract §5, decision locked: no auto-bootstrap). A Companion accept
+// only proves the client's listener answered — incidents already established
+// (see internal/queue/verify.go) that the Plex app can accept a command it
+// never acts on. So after the play command is accepted, poll the client's
+// own session up to 2 tries (immediate, then one more after
+// EngagePollDelay): if either try shows the session non-idle, report success
+// as before; if both show idle/no session, the accept was a no-op — bare
+// `play` only resumes, it can never start an idle client — so report
+// NOT_APPLIED (exit 6) instead of a false ok:true.
+//
+// This verification is local to Play ONLY. seek's pre-seek resume
+// (playerCmd(client, "/player/playback/play", nil) called directly, not
+// through Play) and queue flows are NOT subject to it — they have their own
+// verification (queue.ConfirmEngaged) or none by design (contract §5's
+// exemption list).
+func Play(client jsonx.J) (jsonx.J, *output.CLIError) {
+	result, cliErr := playerCmd(client, "/player/playback/play", nil)
+	if cliErr != nil {
+		return nil, cliErr
+	}
+	for try := 0; try < 2; try++ {
+		if try > 0 {
+			sleep(EngagePollDelay)
+		}
+		if session := getSession(client); session != nil {
+			if state, _ := session["state"].(string); state != "" && state != "idle" {
+				return result, nil
+			}
+		}
+	}
+	return nil, output.Err(output.CodeNotApplied,
+		"client accepted play but nothing started — play only resumes; it cannot start an idle client").
+		WithHint("start items with: plexctl play-media RATING_KEY")
+}
+
+func Pause(client jsonx.J) (jsonx.J, *output.CLIError) {
+	return playerCmd(client, "/player/playback/pause", nil)
+}
+func Stop(client jsonx.J) (jsonx.J, *output.CLIError) {
+	return playerCmd(client, "/player/playback/stop", nil)
+}
+func StepForward(client jsonx.J) (jsonx.J, *output.CLIError) {
 	return playerCmd(client, "/player/playback/stepForward", nil)
 }
-func StepBack(client jsonx.J) jsonx.J { return playerCmd(client, "/player/playback/stepBack", nil) }
-
-// SetVolume mirrors playback.set_volume.
-func SetVolume(client jsonx.J, level int) jsonx.J {
-	return playerCmd(client, "/player/playback/setParameters", map[string]string{"volume": strconv.Itoa(level)})
+func StepBack(client jsonx.J) (jsonx.J, *output.CLIError) {
+	return playerCmd(client, "/player/playback/stepBack", nil)
 }
+
+// SetVolume is gone (v2): the Apple TV Companion listener accepts
+// setParameters volume commands but silently ignores them, so the HTTP call
+// served no purpose — the skill's volume refusal moves into the binary as
+// an immediate CodeUnsupported FailErr in internal/commands/transport.go,
+// with no client resolution and no Companion round trip at all.
 
 // --- seek ------------------------------------------------------------------
 
@@ -336,14 +388,20 @@ var (
 var sleep = time.Sleep
 
 // Seek mirrors playback.seek including the paused-player resume->seek->
-// re-pause dance and its 1s wait.
-func Seek(client jsonx.J, position string, unpause bool) jsonx.J {
+// re-pause dance and its 1s wait. v2 (docs/error_model_v2.md §2/§3/§6):
+// position-parse failures are CodeBadRequest; a relative seek with no
+// current session/viewOffset is CodeNothingPlaying; a failure anywhere in
+// the resume/seek/re-pause sequence is CodeSeekFailed carrying
+// data.seeked/data.repaused so a caller can tell how far it got; on success
+// the envelope gains "playState" (playing/paused) — the state the sequence
+// left the client in.
+func Seek(client jsonx.J, position string, unpause bool) (jsonx.J, *output.CLIError) {
 	position = strings.TrimSpace(position)
 
 	rel := relSeekRe.FindStringSubmatch(position)
 	ts := tsSeekRe.FindStringSubmatch(position)
 	if rel == nil && ts == nil {
-		return jsonx.J{"ok": false, "error": fmt.Sprintf("unrecognised position format: %s", jsonx.PyRepr(position))}
+		return nil, output.Err(output.CodeBadRequest, fmt.Sprintf("unrecognised position format: %s", jsonx.PyRepr(position)))
 	}
 
 	if ts != nil {
@@ -351,15 +409,16 @@ func Seek(client jsonx.J, position string, unpause bool) jsonx.J {
 		ss, _ := strconv.Atoi(s)
 		mm, _ := strconv.Atoi(m)
 		if ss >= 60 {
-			return jsonx.J{"ok": false, "error": "invalid seek position: seconds must be < 60"}
+			return nil, output.Err(output.CodeBadRequest, "invalid seek position: seconds must be < 60")
 		}
 		if h != "" && mm >= 60 {
-			return jsonx.J{"ok": false, "error": "invalid seek position: minutes must be < 60 when hours given"}
+			return nil, output.Err(output.CodeBadRequest, "invalid seek position: minutes must be < 60 when hours given")
 		}
 	}
 
 	// One /status/sessions fetch: relative seek needs viewOffset, every seek
-	// needs the play/pause state to know whether to auto-resume+repause.
+	// needs the play/pause state to know whether to auto-resume+repause (and,
+	// v2, to report the resulting playState on success).
 	var session jsonx.J
 	if rel != nil || unpause {
 		session = getSession(client)
@@ -368,7 +427,8 @@ func Seek(client jsonx.J, position string, unpause bool) jsonx.J {
 	var targetMs int
 	if rel != nil {
 		if session == nil || session["viewOffset"] == nil {
-			return jsonx.J{"ok": false, "error": "could not determine current playback position"}
+			return nil, output.Err(output.CodeNothingPlaying, "could not determine current playback position").
+				WithHint("nothing to seek — start playback first")
 		}
 		sign, valStr, unit := rel[1], rel[2], rel[3]
 		val, _ := strconv.ParseFloat(valStr, 64)
@@ -405,22 +465,41 @@ func Seek(client jsonx.J, position string, unpause bool) jsonx.J {
 	wasPaused := unpause && state == "paused"
 
 	if wasPaused {
-		pre := playerCmd(client, "/player/playback/play", nil)
-		if !jsonx.Truthy(pre["ok"]) {
-			errStr, _ := pre["error"].(string)
-			return jsonx.J{"ok": false, "error": "could not resume before seek: " + errStr}
+		_, cliErr := playerCmd(client, "/player/playback/play", nil)
+		if cliErr != nil {
+			return nil, output.Err(output.CodeSeekFailed, "could not resume before seek: "+cliErr.Message).
+				WithHint("try again").
+				WithData("seeked", false).
+				WithData("repaused", false)
 		}
 		sleep(1 * time.Second)
 	}
-	result := playerCmd(client, "/player/playback/seekTo", map[string]string{"offset": strconv.Itoa(targetMs)})
-	if wasPaused && jsonx.Truthy(result["ok"]) {
-		post := playerCmd(client, "/player/playback/pause", nil)
-		if !jsonx.Truthy(post["ok"]) {
-			errStr, _ := post["error"].(string)
-			return jsonx.J{"ok": false, "error": "seeked but failed to restore pause state: " + errStr}
-		}
+	result, cliErr := playerCmd(client, "/player/playback/seekTo", map[string]string{"offset": strconv.Itoa(targetMs)})
+	if cliErr != nil {
+		return nil, output.Err(output.CodeSeekFailed, "seek failed: "+cliErr.Message).
+			WithHint("try again").
+			WithData("seeked", false).
+			WithData("repaused", false)
 	}
-	return result
+	// playState: the dance (when it ran) always restores pause; otherwise the
+	// client is left exactly as it was found — paused only when the caller
+	// asked to leave it alone (--no-unpause) on a session already paused.
+	// The one gap (absolute position + --no-unpause + no prior session read)
+	// has no observed state to report and defaults to "playing".
+	playState := "playing"
+	if wasPaused {
+		_, cliErr := playerCmd(client, "/player/playback/pause", nil)
+		if cliErr != nil {
+			return nil, output.Err(output.CodeSeekFailed, "seeked but failed to restore pause state: "+cliErr.Message).
+				WithData("seeked", true).
+				WithData("repaused", false)
+		}
+		playState = "paused"
+	} else if state == "paused" {
+		playState = "paused"
+	}
+	result["playState"] = playState
+	return result, nil
 }
 
 // --- playQueue / playMedia ---------------------------------------------------
@@ -446,10 +525,10 @@ func hostPort(serverURL string) (string, int) {
 // useful for display but must never reach a request parameter — a
 // Python-era queue_state.json with a null selectedItemID can still reach
 // this call via the saved/staged Start path).
-func PlayQueue(client jsonx.J, queueID, selectedItemID string) jsonx.J {
+func PlayQueue(client jsonx.J, queueID, selectedItemID string) (jsonx.J, *output.CLIError) {
 	serverID := GetServerMachineID()
 	if serverID == "" {
-		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
 	cfg := config.Load()
 	serverURL := config.StringOr(cfg, "server_url", config.Defaults["server_url"])
@@ -469,10 +548,10 @@ func PlayQueue(client jsonx.J, queueID, selectedItemID string) jsonx.J {
 }
 
 // PlayMedia mirrors playback.play_media.
-func PlayMedia(client jsonx.J, ratingKey string) jsonx.J {
+func PlayMedia(client jsonx.J, ratingKey string) (jsonx.J, *output.CLIError) {
 	serverID := GetServerMachineID()
 	if serverID == "" {
-		return jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
+		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
 	cfg := config.Load()
 	serverURL := config.StringOr(cfg, "server_url", config.Defaults["server_url"])

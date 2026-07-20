@@ -501,6 +501,11 @@ func sectionRow(i jsonx.J) jsonx.J {
 			unwatchedLeaves = 0
 		}
 		row["unwatchedLeaves"] = unwatchedLeaves
+		if row["duration"] != nil {
+			// A show's `duration` is PMS's per-episode nominal runtime, not
+			// a real total — flag it so callers don't mistake it for one.
+			row["durationNominal"] = true
+		}
 	}
 	return row
 }

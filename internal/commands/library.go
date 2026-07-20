@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -25,10 +26,21 @@ func init() {
 	})
 }
 
+// searchMinScoreEnvWarning is appended to a search success envelope when
+// $PLEXCTL_SEARCH_MIN_SCORE is set at runtime. v2 removed --min-score (and
+// the env override that used to pin a single relevance floor) — the env var
+// is now inert, so a stale one in the caller's shell is surfaced as a
+// warning rather than silently doing nothing.
+func searchMinScoreEnvWarning(out jsonx.J) jsonx.J {
+	if _, ok := os.LookupEnv("PLEXCTL_SEARCH_MIN_SCORE"); ok {
+		out = output.Warn(out, output.CodeBadRequest, "PLEXCTL_SEARCH_MIN_SCORE is ignored in v2", "remove the env var")
+	}
+	return out
+}
+
 func newSearchCmd() *cobra.Command {
 	var mediaType string
 	var asJSON bool
-	var minScore float64
 	cmd := &cobra.Command{
 		Use:   "search QUERY",
 		Short: "Search the library for QUERY. Returns ratingKey, title, type, and year per result.",
@@ -38,7 +50,7 @@ Use --type to restrict to show, movie, or episode. Use --json for full metadata.
 
 By default, search returns confident matches only, and widens to weaker ones just
 when nothing confident exists — those carry "loose": true, meaning the hit may be
-noise. Use --min-score to pin a single floor instead (0 disables filtering).`,
+noise.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := choiceError(cmd, "type", mediaType, "show", "movie", "episode"); err != nil {
@@ -46,28 +58,20 @@ noise. Use --min-score to pin a single floor instead (0 disables filtering).`,
 			}
 			query := args[0]
 			if strings.TrimSpace(query) == "" {
-				output.Usage("query cannot be empty")
+				output.FailErr(output.Err(output.CodeBadRequest, "query cannot be empty"))
 				return nil
 			}
-			// An explicit --min-score (or the env override) pins a single floor.
-			// Otherwise take the tiered default, which widens only if it must.
-			var results []jsonx.J
-			var loose bool
-			if ms, pinned := pinnedMinScore(cmd); pinned {
-				results = library.Search(query, mediaType, ms)
-			} else {
-				results, loose = library.SearchTiered(query, mediaType)
-			}
+			results, loose := library.SearchTiered(query, mediaType)
 			if asJSON {
 				out := jsonx.J{"ok": true, "results": results}
 				if loose && len(results) > 0 {
 					out["loose"] = true
 				}
-				output.Print(out)
+				output.Print(searchMinScoreEnvWarning(out))
 				return nil
 			}
 			if len(results) == 0 {
-				output.Print(jsonx.J{"ok": true, "results": []jsonx.J{}, "note": "no matches"})
+				output.Print(searchMinScoreEnvWarning(jsonx.J{"ok": true, "results": []jsonx.J{}, "note": "no matches"}))
 				return nil
 			}
 			summary := make([]jsonx.J, 0, len(results))
@@ -84,15 +88,12 @@ noise. Use --min-score to pin a single floor instead (0 disables filtering).`,
 				out["loose"] = true
 				out["note"] = "low-confidence match — no result cleared the confident threshold"
 			}
-			output.Print(out)
+			output.Print(searchMinScoreEnvWarning(out))
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&mediaType, "type", "", "")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit full metadata JSON")
-	cmd.Flags().Float64Var(&minScore, "min-score", 0,
-		"Pin the PMS relevance floor, disabling the tiered default (0 disables filtering; "+
-			"overridable via $PLEXCTL_SEARCH_MIN_SCORE). PMS scores 0..1: exact ~0.93, prefix ~0.53, weak ~0.33")
 	return cmd
 }
 
@@ -156,7 +157,8 @@ func newMetadataCmd() *cobra.Command {
 			ratingKey := args[0]
 			item := library.Metadata(ratingKey)
 			if !jsonx.Truthy(item) {
-				output.Out(jsonx.J{"ok": false, "error": fmt.Sprintf("no metadata found for ratingKey: %s", ratingKey)})
+				output.FailErr(output.Err(output.CodeNotFound, fmt.Sprintf("no metadata found for ratingKey: %s", ratingKey)).
+					WithData("ratingKey", ratingKey))
 				return nil
 			}
 			output.Out(jsonx.J{"ok": true, "metadata": item})
@@ -184,12 +186,18 @@ Use --key-only to resolve the ratingKey without starting playback.`,
 			item := library.LatestUnwatchedEpisode(query, unwatched)
 			if item == nil {
 				if unwatched {
-					output.Out(jsonx.J{"ok": false, "error": fmt.Sprintf("no unwatched episodes for: %s", jsonx.PyRepr(query))})
+					e := output.Err(output.CodeAllWatched, fmt.Sprintf("no unwatched episodes for: %s", jsonx.PyRepr(query))).
+						WithHint("drop --unwatched to replay, or pick another show")
+					if hit := library.ResolveShow(query); hit != nil {
+						e = e.WithData("show", hit["title"]).WithData("showRatingKey", jsonx.AsStr(hit["ratingKey"]))
+					}
+					output.FailErr(e)
 					return nil
 				}
 				movies, _ := library.SearchTiered(query, "movie")
 				if len(movies) == 0 {
-					output.Out(jsonx.J{"ok": false, "error": fmt.Sprintf("nothing found for: %s", jsonx.PyRepr(query))})
+					output.FailErr(output.Err(output.CodeNotFound, fmt.Sprintf("nothing found for: %s", jsonx.PyRepr(query))).
+						WithData("query", query))
 					return nil
 				}
 				item = movies[0]
@@ -207,16 +215,18 @@ Use --key-only to resolve the ratingKey without starting playback.`,
 				return nil
 			}
 			target := clients.Resolve(client)
-			result := playback.PlayMedia(target, jsonx.AsStr(item["ratingKey"]))
-			if jsonx.Truthy(result["ok"]) {
-				result["playing"] = jsonx.J{
-					"title":     item["title"],
-					"type":      item["type"],
-					"season":    item["parentIndex"],
-					"episode":   item["index"],
-					"year":      item["year"],
-					"ratingKey": item["ratingKey"],
-				}
+			result, cliErr := playback.PlayMedia(target, jsonx.AsStr(item["ratingKey"]))
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			result["playing"] = jsonx.J{
+				"title":     item["title"],
+				"type":      item["type"],
+				"season":    item["parentIndex"],
+				"episode":   item["index"],
+				"year":      item["year"],
+				"ratingKey": item["ratingKey"],
 			}
 			output.Out(result)
 			return nil
@@ -247,7 +257,7 @@ only, --ndjson to stream line-delimited rows for batch callers.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			show := args[0]
 			if strings.TrimSpace(show) == "" {
-				output.Usage("show cannot be empty")
+				output.FailErr(output.Err(output.CodeBadRequest, "show cannot be empty"))
 				return nil
 			}
 			var seasonPtr *int

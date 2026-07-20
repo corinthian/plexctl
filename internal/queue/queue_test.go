@@ -15,6 +15,7 @@ import (
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/queuestate"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
@@ -182,8 +183,11 @@ func TestCreateSingleKeySendsContinuous1(t *testing.T) {
 	f.serverIDRoute(serverMID)
 	f.onJSON("POST", "/playQueues", jsonx.J{"MediaContainer": jsonx.J{"playQueueID": "999", "playQueueSelectedItemID": "42"}})
 
-	result := Create([]string{"100"}, false, false)
+	result, cliErr := Create([]string{"100"}, false, false)
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	if result["ok"] != true {
 		t.Fatalf("result = %#v", result)
 	}
@@ -209,8 +213,11 @@ func TestCreateMultiKeySendsContinuous0AndAddsRemaining(t *testing.T) {
 	f.onJSON("POST", "/playQueues", jsonx.J{"MediaContainer": jsonx.J{"playQueueID": "999", "playQueueSelectedItemID": "42"}})
 	f.onJSON("PUT", "/playQueues/999", jsonx.J{"MediaContainer": jsonx.J{"playQueueID": "999"}})
 
-	result := Create([]string{"100", "101", "102"}, false, false)
+	result, cliErr := Create([]string{"100", "101", "102"}, false, false)
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	if result["ok"] != true {
 		t.Fatalf("result = %#v", result)
 	}
@@ -267,14 +274,26 @@ func TestCreateContinuousDoesNotAffectShuffleRepeat(t *testing.T) {
 
 // --- Create: error branches ---------------------------------------------------
 
+// TestCreateReturnsErrorWhenServerIDMissing pins the v2 mapping: "could not
+// retrieve server machineIdentifier" is enumerated verbatim in the
+// error-model-v2 code table under CodeInternal (exit 4) — not a queue-domain
+// code, since it happens before any queue exists.
 func TestCreateReturnsErrorWhenServerIDMissing(t *testing.T) {
 	newFakePMS(t) // no "/" route registered -> 404 -> GetServerMachineID() == ""
 
-	result := Create([]string{"100"}, false, false)
+	result, cliErr := Create([]string{"100"}, false, false)
 
-	want := jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeInternal {
+		t.Fatalf("cliErr = %#v, want CodeInternal", cliErr)
+	}
+	if cliErr.ExitCode() != output.ExitInternal {
+		t.Fatalf("exit = %d, want %d", cliErr.ExitCode(), output.ExitInternal)
+	}
+	if cliErr.Message != "could not retrieve server machineIdentifier" {
+		t.Fatalf("message = %q", cliErr.Message)
 	}
 }
 
@@ -283,11 +302,19 @@ func TestCreateMissingPlayQueueIDReturnsError(t *testing.T) {
 	f.serverIDRoute(serverMID)
 	f.onJSON("POST", "/playQueues", jsonx.J{"MediaContainer": jsonx.J{}})
 
-	result := Create([]string{"100"}, false, false)
+	result, cliErr := Create([]string{"100"}, false, false)
 
-	want := jsonx.J{"ok": false, "error": "playQueue creation returned no playQueueID"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeQueueCreateFailed {
+		t.Fatalf("cliErr = %#v, want CodeQueueCreateFailed", cliErr)
+	}
+	if cliErr.Message != "playQueue creation returned no playQueueID" {
+		t.Fatalf("message = %q", cliErr.Message)
+	}
+	if cliErr.Hint != "retry the queue command" {
+		t.Fatalf("hint = %q", cliErr.Hint)
 	}
 }
 
@@ -296,11 +323,16 @@ func TestCreateMissingSelectedItemIDReturnsError(t *testing.T) {
 	f.serverIDRoute(serverMID)
 	f.onJSON("POST", "/playQueues", jsonx.J{"MediaContainer": jsonx.J{"playQueueID": "999"}})
 
-	result := Create([]string{"100"}, false, false)
+	result, cliErr := Create([]string{"100"}, false, false)
 
-	want := jsonx.J{"ok": false, "error": "playQueue created but PMS returned no playQueueSelectedItemID"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeQueueCreateFailed {
+		t.Fatalf("cliErr = %#v, want CodeQueueCreateFailed", cliErr)
+	}
+	if cliErr.Message != "playQueue created but PMS returned no playQueueSelectedItemID" {
+		t.Fatalf("message = %q", cliErr.Message)
 	}
 }
 
@@ -318,19 +350,22 @@ func TestCreateMultiKeyMidLoopFailureRollsBack(t *testing.T) {
 	// (never raises) by returning a server error.
 	f.onStatus("DELETE", "/playQueues/999", 500)
 
-	result := Create([]string{"100", "101", "102"}, false, false)
+	result, cliErr := Create([]string{"100", "101", "102"}, false, false)
 
-	if result["ok"] != false {
-		t.Fatalf("result = %#v", result)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	if result["error"] != "add to queue returned unexpected response" {
-		t.Fatalf("error = %#v", result["error"])
+	if cliErr == nil || cliErr.Code != output.CodeQueueCreateFailed {
+		t.Fatalf("cliErr = %#v, want CodeQueueCreateFailed", cliErr)
 	}
-	if result["partialQueueID"] != "999" {
-		t.Fatalf("partialQueueID = %#v", result["partialQueueID"])
+	if cliErr.Message != "add to queue returned unexpected response" {
+		t.Fatalf("message = %q", cliErr.Message)
 	}
-	if result["rollbackAttempted"] != true {
-		t.Fatalf("rollbackAttempted = %#v", result["rollbackAttempted"])
+	if cliErr.Data["partialQueueID"] != "999" {
+		t.Fatalf("partialQueueID = %#v", cliErr.Data["partialQueueID"])
+	}
+	if cliErr.Data["rollbackAttempted"] != true {
+		t.Fatalf("rollbackAttempted = %#v", cliErr.Data["rollbackAttempted"])
 	}
 	if got := f.callCount("DELETE", "/playQueues/999"); got != 1 {
 		t.Fatalf("rollback DELETE calls = %d, want 1", got)
@@ -351,20 +386,22 @@ func TestCreateMultiKeyTransportFailureRollsBack(t *testing.T) {
 	f.onStatus("PUT", "/playQueues/999", 500) // every Add() PUT fails as an HTTP error
 	f.onStatus("DELETE", "/playQueues/999", 500)
 
-	result := Create([]string{"100", "101"}, false, false)
+	result, cliErr := Create([]string{"100", "101"}, false, false)
 
-	if result["ok"] != false {
-		t.Fatalf("result = %#v", result)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	errStr, _ := result["error"].(string)
-	if !strings.Contains(errStr, "500") {
-		t.Fatalf("error = %q, want it to carry the HTTP 500", errStr)
+	if cliErr == nil || cliErr.Code != output.CodeQueueCreateFailed {
+		t.Fatalf("cliErr = %#v, want CodeQueueCreateFailed", cliErr)
 	}
-	if result["partialQueueID"] != "999" {
-		t.Fatalf("partialQueueID = %#v, want 999", result["partialQueueID"])
+	if !strings.Contains(cliErr.Message, "500") {
+		t.Fatalf("message = %q, want it to carry the HTTP 500", cliErr.Message)
 	}
-	if result["rollbackAttempted"] != true {
-		t.Fatalf("rollbackAttempted = %#v, want true", result["rollbackAttempted"])
+	if cliErr.Data["partialQueueID"] != "999" {
+		t.Fatalf("partialQueueID = %#v, want 999", cliErr.Data["partialQueueID"])
+	}
+	if cliErr.Data["rollbackAttempted"] != true {
+		t.Fatalf("rollbackAttempted = %#v, want true", cliErr.Data["rollbackAttempted"])
 	}
 	if got := f.callCount("DELETE", "/playQueues/999"); got != 1 {
 		t.Fatalf("rollback DELETE calls = %d, want 1", got)
@@ -382,11 +419,19 @@ func appleTVOn(baseurl string) jsonx.J {
 func TestStartNoStateReturnsNoActiveQueue(t *testing.T) {
 	newFakePMS(t) // no saved state
 
-	result := Start(appleTV())
+	result, cliErr := Start(appleTV())
 
-	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeNoQueue {
+		t.Fatalf("cliErr = %#v, want CodeNoQueue", cliErr)
+	}
+	if cliErr.Message != "no active queue on Apple TV" {
+		t.Fatalf("message = %q", cliErr.Message)
+	}
+	if cliErr.Data["client"] != "Apple TV" {
+		t.Fatalf("data.client = %#v", cliErr.Data["client"])
 	}
 }
 
@@ -396,8 +441,11 @@ func TestStartHappyPathBindsSavedQueue(t *testing.T) {
 	f.serverIDRoute(serverMID)
 	f.onStatus("GET", "/player/playback/playMedia", 200)
 
-	result := Start(appleTVOn(f.srv.URL))
+	result, cliErr := Start(appleTVOn(f.srv.URL))
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v, want nil", cliErr)
+	}
 	if result["ok"] != true {
 		t.Fatalf("result = %#v, want ok:true", result)
 	}
@@ -429,8 +477,11 @@ func TestStartNullSelectedItemIDOmitsParamInsteadOfSendingNone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := Start(appleTVOn(f.srv.URL))
+	result, cliErr := Start(appleTVOn(f.srv.URL))
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v, want nil", cliErr)
+	}
 	if result["ok"] != true {
 		t.Fatalf("result = %#v, want ok:true", result)
 	}
@@ -443,21 +494,31 @@ func TestStartNullSelectedItemIDOmitsParamInsteadOfSendingNone(t *testing.T) {
 	}
 }
 
+// TestStartTransportFailurePreservesStateAndFlagsUnreachable pins B1's
+// queue-start analogue: a bind failure here always maps to CodeQueueStaged
+// (never CONFLICT — Start reads and leaves a single persisted entry, so
+// there is never a second queue to conflict with).
 func TestStartTransportFailurePreservesStateAndFlagsUnreachable(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "555", "999")
 	f.serverIDRoute(serverMID)
 	// Companion baseurl points at a dead port -> "connection failed:".
-	result := Start(appleTVOn("http://127.0.0.1:1"))
+	result, cliErr := Start(appleTVOn("http://127.0.0.1:1"))
 
-	if result["ok"] != false {
-		t.Fatalf("result = %#v, want ok:false", result)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	if result["clientUnreachable"] != true {
-		t.Fatalf("clientUnreachable = %#v, want true", result["clientUnreachable"])
+	if cliErr == nil || cliErr.Code != output.CodeQueueStaged {
+		t.Fatalf("cliErr = %#v, want CodeQueueStaged", cliErr)
 	}
-	if result["playQueueID"] != "555" || result["selectedItemID"] != "999" {
-		t.Fatalf("result = %#v, want IDs echoed", result)
+	if cliErr.Data["clientUnreachable"] != true {
+		t.Fatalf("clientUnreachable = %#v, want true", cliErr.Data["clientUnreachable"])
+	}
+	if cliErr.Data["playQueueID"] != "555" || cliErr.Data["selectedItemID"] != "999" {
+		t.Fatalf("data = %#v, want IDs echoed", cliErr.Data)
+	}
+	if cliErr.Data["staged"] != true {
+		t.Fatalf("staged = %#v, want true", cliErr.Data["staged"])
 	}
 	if queuestate.Load("abc") == nil {
 		t.Fatalf("staged state must be kept for retry")
@@ -471,22 +532,30 @@ func TestAddUnexpectedResponseError(t *testing.T) {
 	f.serverIDRoute(serverMID)
 	f.onJSON("PUT", "/playQueues/999", jsonx.J{"MediaContainer": jsonx.J{}})
 
-	result := Add("999", "100")
+	result, err := Add("999", "100")
 
-	want := jsonx.J{"ok": false, "error": "add to queue returned unexpected response"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if err == nil || err.Error() != "add to queue returned unexpected response" {
+		t.Fatalf("err = %v", err)
 	}
 }
 
+// TestAddReturnsErrorWhenServerIDMissing pins Add's low-level errNoServerID
+// sentinel — both Create and AddToClient recode it to CodeInternal
+// identically (docs/error_model_v2.md's verbatim "could not retrieve server
+// machineIdentifier" table entry).
 func TestAddReturnsErrorWhenServerIDMissing(t *testing.T) {
 	newFakePMS(t) // no "/" route -> GetServerMachineID() == ""
 
-	result := Add("999", "100")
+	result, err := Add("999", "100")
 
-	want := jsonx.J{"ok": false, "error": "could not retrieve server machineIdentifier"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if err != errNoServerID {
+		t.Fatalf("err = %v, want errNoServerID", err)
 	}
 }
 
@@ -526,10 +595,10 @@ func TestResolveQueueIDReturnsPersisted(t *testing.T) {
 	testutil.Setup(t, "http://unused")
 	queuestate.Save("abc", "5535", "42687")
 
-	qid, err := resolveQueueID(appleTV())
+	qid, cliErr := resolveQueueID(appleTV())
 
-	if err != nil {
-		t.Fatalf("err = %#v", err)
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 	if qid != "5535" {
 		t.Fatalf("qid = %q", qid)
@@ -539,14 +608,13 @@ func TestResolveQueueIDReturnsPersisted(t *testing.T) {
 func TestResolveQueueIDNoStateReturnsNoActiveQueue(t *testing.T) {
 	testutil.Setup(t, "http://unused")
 
-	qid, err := resolveQueueID(appleTV())
+	qid, cliErr := resolveQueueID(appleTV())
 
 	if qid != "" {
 		t.Fatalf("qid = %q, want empty", qid)
 	}
-	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
-	if !reflect.DeepEqual(err, want) {
-		t.Fatalf("err = %#v, want %#v", err, want)
+	if cliErr == nil || cliErr.Code != output.CodeNoQueue || cliErr.Message != "no active queue on Apple TV" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 }
 
@@ -554,13 +622,13 @@ func TestResolveQueueIDDifferentClientDoesntLeak(t *testing.T) {
 	testutil.Setup(t, "http://unused")
 	queuestate.Save("xyz", "5535", "42687")
 
-	qid, err := resolveQueueID(appleTV())
+	qid, cliErr := resolveQueueID(appleTV())
 
 	if qid != "" {
 		t.Fatalf("qid = %q, want empty", qid)
 	}
-	if err["error"] != "no active queue on Apple TV" {
-		t.Fatalf("err = %#v", err)
+	if cliErr == nil || cliErr.Message != "no active queue on Apple TV" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 }
 
@@ -578,13 +646,13 @@ func TestResolveQueueIDUsesMachineIdentifierNotName(t *testing.T) {
 func TestResolveQueueIDNoMachineIdentifierUsesNameInError(t *testing.T) {
 	testutil.Setup(t, "http://unused")
 
-	qid, err := resolveQueueID(jsonx.J{"name": "X"})
+	qid, cliErr := resolveQueueID(jsonx.J{"name": "X"})
 
 	if qid != "" {
 		t.Fatalf("qid = %q, want empty", qid)
 	}
-	if err["error"] != "no active queue on X" {
-		t.Fatalf("err = %#v", err)
+	if cliErr == nil || cliErr.Message != "no active queue on X" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 }
 
@@ -593,8 +661,11 @@ func TestResolveQueueIDNoMachineIdentifierUsesNameInError(t *testing.T) {
 func TestShowReturnsEmptyWhenNoState(t *testing.T) {
 	newFakePMS(t)
 
-	result := Show(appleTV())
+	result, cliErr := Show(appleTV())
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	want := jsonx.J{"ok": true, "state": "empty", "client": "Apple TV", "items": []jsonx.J{}}
 	if !reflect.DeepEqual(normalize(t, result), normalize(t, want)) {
 		t.Fatalf("result = %#v, want %#v", result, want)
@@ -606,8 +677,11 @@ func TestShowReturnsEmptyWhenPMSReturnsEmptyMetadata(t *testing.T) {
 	queuestate.Save("abc", "5535", "42687")
 	f.onJSON("GET", "/playQueues/5535", jsonx.J{"MediaContainer": jsonx.J{"Metadata": []any{}}})
 
-	result := Show(appleTV())
+	result, cliErr := Show(appleTV())
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	if result["ok"] != true || result["state"] != "empty" {
 		t.Fatalf("result = %#v", result)
 	}
@@ -626,8 +700,11 @@ func TestShow404KeepsStateAndReturnsEmpty(t *testing.T) {
 	queuestate.Save("abc", "5535", "42687")
 	f.onStatus("GET", "/playQueues/5535", 404)
 
-	result := Show(appleTV())
+	result, cliErr := Show(appleTV())
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	want := jsonx.J{"ok": true, "state": "empty", "client": "Apple TV", "items": []jsonx.J{}}
 	if !reflect.DeepEqual(normalize(t, result), normalize(t, want)) {
 		t.Fatalf("result = %#v, want %#v", result, want)
@@ -637,20 +714,23 @@ func TestShow404KeepsStateAndReturnsEmpty(t *testing.T) {
 	}
 }
 
-// B4: a non-404 error on the queue read surfaces as an error shape (exit
-// codes preserved via the message) and does NOT clear state.
-func TestShowNon404ErrorReturnsErrorShapeAndKeepsState(t *testing.T) {
+// TestShowNon404ErrorPassesThroughAPIClassify pins the v2 rule: a non-404
+// fetch failure is not re-wrapped in a queue-specific code, it's whatever
+// api.Classify already produces for the upstream failure shape (here, an
+// HTTP 500 -> CodeServerError) — same "don't re-wrap" principle documented
+// for queue-show in docs/error_model_v2.md §3.
+func TestShowNon404ErrorPassesThroughAPIClassify(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "5535", "42687")
 	f.onStatus("GET", "/playQueues/5535", 500)
 
-	result := Show(appleTV())
+	result, cliErr := Show(appleTV())
 
-	if result["ok"] != false {
-		t.Fatalf("result = %#v, want ok:false", result)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	if errStr, _ := result["error"].(string); errStr == "" {
-		t.Fatalf("error missing: %#v", result)
+	if cliErr == nil || cliErr.Code != output.CodeServerError {
+		t.Fatalf("cliErr = %#v, want CodeServerError", cliErr)
 	}
 	if queuestate.Load("abc") == nil {
 		t.Fatalf("state must be kept on non-404 error")
@@ -670,7 +750,10 @@ func TestShowPopulatedMatchesGoldenAndOmitsRatingKey(t *testing.T) {
 		},
 	})
 
-	result := Show(appleTV())
+	result, cliErr := Show(appleTV())
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 
 	golden := loadGolden(t, "queue-show.json")
 	got := normalize(t, result)
@@ -685,67 +768,61 @@ func TestShowPopulatedMatchesGoldenAndOmitsRatingKey(t *testing.T) {
 	}
 }
 
-// --- Shuffle / Unshuffle / RemoveItem: no-active-queue passthrough -----------
+// --- Shuffle / Unshuffle: refused outright, zero HTTP ------------------------
 
-func TestShuffleReturnsNoActiveQueueErrorVerbatim(t *testing.T) {
+// TestShuffleRefusesWithoutAnyHTTPCall and TestUnshuffleRefusesWithoutAnyHTTPCall
+// pin the v2 behavior change: PMS 1.43 404s both endpoints, so plexctl now
+// owns the refusal directly instead of resolving a client, loading state, or
+// making any network call at all (docs/error_model_v2.md §3).
+func TestShuffleRefusesWithoutAnyHTTPCall(t *testing.T) {
 	f := newFakePMS(t)
+	queuestate.Save("abc", "5535", "42687") // even with a saved queue present
 
-	result := Shuffle(appleTV())
+	cliErr := Shuffle()
 
-	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if cliErr == nil || cliErr.Code != output.CodeUnsupported {
+		t.Fatalf("cliErr = %#v, want CodeUnsupported", cliErr)
+	}
+	if cliErr.ExitCode() != output.ExitPlex {
+		t.Fatalf("exit = %d, want %d", cliErr.ExitCode(), output.ExitPlex)
+	}
+	if cliErr.Hint != "" {
+		t.Fatalf("hint = %q, want none", cliErr.Hint)
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("expected no network calls, got %#v", f.calls)
 	}
 }
 
-func TestUnshuffleReturnsNoActiveQueueErrorVerbatim(t *testing.T) {
+func TestUnshuffleRefusesWithoutAnyHTTPCall(t *testing.T) {
 	f := newFakePMS(t)
+	queuestate.Save("abc", "5535", "42687")
 
-	result := Unshuffle(appleTV())
+	cliErr := Unshuffle()
 
-	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if cliErr == nil || cliErr.Code != output.CodeUnsupported {
+		t.Fatalf("cliErr = %#v, want CodeUnsupported", cliErr)
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("expected no network calls, got %#v", f.calls)
 	}
 }
+
+// --- RemoveItem ---------------------------------------------------------------
 
 func TestRemoveItemReturnsNoActiveQueueErrorVerbatim(t *testing.T) {
 	f := newFakePMS(t)
 
-	result := RemoveItem(appleTV(), "999")
+	result, cliErr := RemoveItem(appleTV(), "999")
 
-	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeNoQueue || cliErr.Message != "no active queue on Apple TV" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("expected no network calls, got %#v", f.calls)
-	}
-}
-
-func TestShuffleAndUnshufflePutCorrectPaths(t *testing.T) {
-	f := newFakePMS(t)
-	queuestate.Save("abc", "5535", "42687")
-	f.onJSON("PUT", "/playQueues/5535/shuffle", jsonx.J{"MediaContainer": jsonx.J{}})
-	f.onJSON("PUT", "/playQueues/5535/unshuffle", jsonx.J{"MediaContainer": jsonx.J{}})
-
-	if r := Shuffle(appleTV()); r["ok"] != true {
-		t.Fatalf("Shuffle result = %#v", r)
-	}
-	if r := Unshuffle(appleTV()); r["ok"] != true {
-		t.Fatalf("Unshuffle result = %#v", r)
-	}
-	if f.callCount("PUT", "/playQueues/5535/shuffle") != 1 {
-		t.Fatalf("shuffle PUT count = %d", f.callCount("PUT", "/playQueues/5535/shuffle"))
-	}
-	if f.callCount("PUT", "/playQueues/5535/unshuffle") != 1 {
-		t.Fatalf("unshuffle PUT count = %d", f.callCount("PUT", "/playQueues/5535/unshuffle"))
 	}
 }
 
@@ -754,8 +831,11 @@ func TestRemoveItemDeletesCorrectPath(t *testing.T) {
 	queuestate.Save("abc", "5535", "42687")
 	f.onJSON("DELETE", "/playQueues/5535/items/321", jsonx.J{"MediaContainer": jsonx.J{}})
 
-	result := RemoveItem(appleTV(), "321")
+	result, cliErr := RemoveItem(appleTV(), "321")
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	if result["ok"] != true {
 		t.Fatalf("result = %#v", result)
 	}
@@ -771,8 +851,11 @@ func TestClearRemovesPersistedState(t *testing.T) {
 	queuestate.Save("abc", "5535", "42687")
 	f.onJSON("DELETE", "/playQueues/5535/items", jsonx.J{"MediaContainer": jsonx.J{}})
 
-	result := Clear(appleTV())
+	result, cliErr := Clear(appleTV())
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	if result["ok"] != true {
 		t.Fatalf("result = %#v", result)
 	}
@@ -781,10 +864,35 @@ func TestClearRemovesPersistedState(t *testing.T) {
 	}
 }
 
+// TestClearNon404FailurePassesThroughAPIClassify covers the gap flagged in
+// the P2-E report: Clear's non-404 TryDelete failure was previously a bare
+// error string; it now passes straight through api.Classify (same "don't
+// re-wrap" principle as Show) — an HTTP 500 here lands on CodeServerError.
+func TestClearNon404FailurePassesThroughAPIClassify(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "5535", "42687")
+	f.onStatus("DELETE", "/playQueues/5535/items", 500)
+
+	result, cliErr := Clear(appleTV())
+
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeServerError {
+		t.Fatalf("cliErr = %#v, want CodeServerError", cliErr)
+	}
+	if queuestate.Load("abc") == nil {
+		t.Fatalf("state must be kept on a non-404 delete failure")
+	}
+}
+
 // TestClearPropagatesStateWriteFailure pins the D2 ruling's Clear clause:
 // unlike queue's own bind-success path, Clear errors DO propagate to
 // queue-clear's error path — there's no "playback already running" reason
 // to soften them the way W10/D2 softens queue's own state-write failure.
+// v2: this local state-write failure is CodeInternal (flagged in the P2-E
+// report — not in the given closed queue-code mapping, but neither STAGED
+// nor CONFLICT fit a plain disk-permission fault).
 func TestClearPropagatesStateWriteFailure(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "5535", "42687")
@@ -796,13 +904,13 @@ func TestClearPropagatesStateWriteFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	result := Clear(appleTV())
+	result, cliErr := Clear(appleTV())
 
-	if result["ok"] != false {
-		t.Fatalf("result = %#v, want ok:false", result)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	if _, hasErr := result["error"]; !hasErr {
-		t.Fatalf("result missing error: %#v", result)
+	if cliErr == nil || cliErr.Code != output.CodeInternal {
+		t.Fatalf("cliErr = %#v, want CodeInternal", cliErr)
 	}
 }
 
@@ -813,8 +921,11 @@ func TestClear404IsIdempotentSuccessAndClearsState(t *testing.T) {
 	queuestate.Save("abc", "5535", "42687")
 	f.onStatus("DELETE", "/playQueues/5535/items", 404)
 
-	result := Clear(appleTV())
+	result, cliErr := Clear(appleTV())
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	if result["ok"] != true {
 		t.Fatalf("result = %#v, want ok:true", result)
 	}
@@ -826,13 +937,13 @@ func TestClear404IsIdempotentSuccessAndClearsState(t *testing.T) {
 func TestClearReturnsNoActiveQueueWhenStateEmpty(t *testing.T) {
 	newFakePMS(t)
 
-	result := Clear(appleTV())
+	result, cliErr := Clear(appleTV())
 
-	if result["ok"] != false {
-		t.Fatalf("result = %#v", result)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	if result["error"] != "no active queue on Apple TV" {
-		t.Fatalf("error = %#v", result["error"])
+	if cliErr == nil || cliErr.Code != output.CodeNoQueue || cliErr.Message != "no active queue on Apple TV" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 }
 
@@ -841,11 +952,13 @@ func TestClearReturnsNoActiveQueueWhenStateEmpty(t *testing.T) {
 func TestAddToClientEmptyKeysRejected(t *testing.T) {
 	f := newFakePMS(t)
 
-	result := AddToClient(appleTV(), []string{})
+	result, cliErr := AddToClient(appleTV(), []string{})
 
-	want := jsonx.J{"ok": false, "error": "add requires at least one ratingKey"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeBadRequest || cliErr.Message != "add requires at least one ratingKey" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 	if len(f.calls) != 0 {
 		t.Fatalf("expected no network calls, got %#v", f.calls)
@@ -855,11 +968,13 @@ func TestAddToClientEmptyKeysRejected(t *testing.T) {
 func TestAddToClientNoActiveQueueReturnsResolveError(t *testing.T) {
 	newFakePMS(t)
 
-	result := AddToClient(appleTV(), []string{"100"})
+	result, cliErr := AddToClient(appleTV(), []string{"100"})
 
-	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeNoQueue || cliErr.Message != "no active queue on Apple TV" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 }
 
@@ -872,21 +987,43 @@ func TestAddToClient404KeepsStateAndReturnsNoActiveQueue(t *testing.T) {
 	f.serverIDRoute(serverMID)
 	f.onStatus("GET", "/playQueues/5582", 404)
 
-	result := AddToClient(appleTV(), []string{"100"})
+	result, cliErr := AddToClient(appleTV(), []string{"100"})
 
-	want := jsonx.J{"ok": false, "error": "no active queue on Apple TV"}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeNoQueue || cliErr.Message != "no active queue on Apple TV" {
+		t.Fatalf("cliErr = %#v", cliErr)
 	}
 	if queuestate.Load("abc") == nil {
-		t.Fatalf("state must be KEPT on 404 (finding 7) — a transient 404 must not delete an addressable queue")
+		t.Fatalf("state must be KEPT on 404 (finding 7) — a transient 404 must not destroy an addressable queue")
+	}
+}
+
+// TestAddToClientSizeGETNon404FailurePassesThroughAPIClassify covers the gap
+// flagged in the P2-E report: the initial size-read GET's non-404 failure
+// passes straight through api.Classify, same as Show/Clear.
+func TestAddToClientSizeGETNon404FailurePassesThroughAPIClassify(t *testing.T) {
+	f := newFakePMS(t)
+	queuestate.Save("abc", "5582", "1")
+	f.serverIDRoute(serverMID)
+	f.onStatus("GET", "/playQueues/5582", 500)
+
+	result, cliErr := AddToClient(appleTV(), []string{"100"})
+
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	if cliErr == nil || cliErr.Code != output.CodeServerError {
+		t.Fatalf("cliErr = %#v, want CodeServerError", cliErr)
 	}
 }
 
 // TestAddToClientPUTTransportFailureReturnsAddedInsteadOfExiting pins
 // W11's effect on AddToClient (which shares Add() with Create): the PUT
 // itself now goes through api.TryPut, so an HTTP error on the add is
-// reported instead of killing the process.
+// reported instead of killing the process. v2: CodeQueuePartial, added and
+// failedKey moved into data.
 func TestAddToClientPUTTransportFailureReturnsAddedInsteadOfExiting(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "5582", "1")
@@ -894,20 +1031,28 @@ func TestAddToClientPUTTransportFailureReturnsAddedInsteadOfExiting(t *testing.T
 	f.onSequence("GET", "/playQueues/5582", sizeResp(4))
 	f.onStatus("PUT", "/playQueues/5582", 500)
 
-	result := AddToClient(appleTV(), []string{"100"})
+	result, cliErr := AddToClient(appleTV(), []string{"100"})
 
-	if result["ok"] != false {
-		t.Fatalf("result = %#v, want ok:false", result)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	if result["added"] != 0 {
-		t.Fatalf("added = %#v, want 0", result["added"])
+	if cliErr == nil || cliErr.Code != output.CodeQueuePartial {
+		t.Fatalf("cliErr = %#v, want CodeQueuePartial", cliErr)
 	}
-	if result["playQueueID"] != "5582" {
-		t.Fatalf("playQueueID = %#v, want 5582", result["playQueueID"])
+	if cliErr.Hint != "retry with the remaining items" {
+		t.Fatalf("hint = %q", cliErr.Hint)
 	}
-	errStr, _ := result["error"].(string)
-	if !strings.Contains(errStr, "500") {
-		t.Fatalf("error = %q, want it to carry the HTTP 500", errStr)
+	if cliErr.Data["added"] != 0 {
+		t.Fatalf("added = %#v, want 0", cliErr.Data["added"])
+	}
+	if cliErr.Data["failedKey"] != "100" {
+		t.Fatalf("failedKey = %#v, want 100", cliErr.Data["failedKey"])
+	}
+	if cliErr.Data["playQueueID"] != "5582" {
+		t.Fatalf("playQueueID = %#v, want 5582", cliErr.Data["playQueueID"])
+	}
+	if !strings.Contains(cliErr.Message, "500") {
+		t.Fatalf("message = %q, want it to carry the HTTP 500", cliErr.Message)
 	}
 }
 
@@ -918,8 +1063,11 @@ func TestAddToClientSingleKeyAppendsOnce(t *testing.T) {
 	f.onSequence("GET", "/playQueues/5582", sizeResp(4), sizeResp(5))
 	f.onJSON("PUT", "/playQueues/5582", jsonx.J{"MediaContainer": jsonx.J{"playQueueID": "5582"}})
 
-	result := AddToClient(appleTV(), []string{"100"})
+	result, cliErr := AddToClient(appleTV(), []string{"100"})
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	want := jsonx.J{"ok": true, "added": 1, "playQueueID": "5582"}
 	if !reflect.DeepEqual(normalize(t, result), normalize(t, want)) {
 		t.Fatalf("result = %#v, want %#v", result, want)
@@ -933,8 +1081,8 @@ func TestAddToClientSingleKeyAppendsOnce(t *testing.T) {
 // TestAddToClientVerifyGETTimeoutReturnsAddedInsteadOfExiting pins W6: the
 // verify-GET after each PUT used to be print-and-exit api.Get, which would
 // kill the process on a mid-loop timeout and lose the already-tracked
-// `added` count. It's now api.TryGet, so a timeout surfaces as an
-// ok:false envelope carrying `added` and `playQueueID` instead.
+// `added` count. It's now api.TryGet, so a timeout surfaces as
+// CodeQueuePartial carrying added and playQueueID in data.
 func TestAddToClientVerifyGETTimeoutReturnsAddedInsteadOfExiting(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "5582", "1")
@@ -959,20 +1107,22 @@ func TestAddToClientVerifyGETTimeoutReturnsAddedInsteadOfExiting(t *testing.T) {
 	api.SetTimeoutOverride(0.05)
 	t.Cleanup(api.ClearTimeoutOverride)
 
-	result := AddToClient(appleTV(), []string{"100", "101"})
+	result, cliErr := AddToClient(appleTV(), []string{"100", "101"})
 
-	if result["ok"] != false {
-		t.Fatalf("result = %#v, want ok:false", result)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	if result["added"] != 0 {
-		t.Fatalf("added = %#v, want 0 (verify-GET failed before the first key could be confirmed)", result["added"])
+	if cliErr == nil || cliErr.Code != output.CodeQueuePartial {
+		t.Fatalf("cliErr = %#v, want CodeQueuePartial", cliErr)
 	}
-	if result["playQueueID"] != "5582" {
-		t.Fatalf("playQueueID = %#v, want 5582", result["playQueueID"])
+	if cliErr.Data["added"] != 0 {
+		t.Fatalf("added = %#v, want 0 (verify-GET failed before the first key could be confirmed)", cliErr.Data["added"])
 	}
-	errStr, _ := result["error"].(string)
-	if !strings.HasPrefix(errStr, "request timed out") {
-		t.Fatalf("error = %q, want a \"request timed out\" prefix", errStr)
+	if cliErr.Data["playQueueID"] != "5582" {
+		t.Fatalf("playQueueID = %#v, want 5582", cliErr.Data["playQueueID"])
+	}
+	if !strings.HasPrefix(cliErr.Message, "request timed out") {
+		t.Fatalf("message = %q, want a \"request timed out\" prefix", cliErr.Message)
 	}
 }
 
@@ -983,8 +1133,11 @@ func TestAddToClientMultiKeyLoopsPerKey(t *testing.T) {
 	f.onSequence("GET", "/playQueues/5582", sizeResp(4), sizeResp(5), sizeResp(6), sizeResp(7))
 	f.onJSON("PUT", "/playQueues/5582", jsonx.J{"MediaContainer": jsonx.J{"playQueueID": "5582"}})
 
-	result := AddToClient(appleTV(), []string{"100", "101", "102"})
+	result, cliErr := AddToClient(appleTV(), []string{"100", "101", "102"})
 
+	if cliErr != nil {
+		t.Fatalf("cliErr = %#v", cliErr)
+	}
 	want := jsonx.J{"ok": true, "added": 3, "playQueueID": "5582"}
 	if !reflect.DeepEqual(normalize(t, result), normalize(t, want)) {
 		t.Fatalf("result = %#v, want %#v", result, want)
@@ -1013,22 +1166,32 @@ func TestAddToClientPartialFailureFromUnderlyingAddReportsAdded(t *testing.T) {
 		jsonx.J{"MediaContainer": jsonx.J{}},                      // key 101: unexpected response
 	)
 
-	result := AddToClient(appleTV(), []string{"100", "101", "102"})
+	result, cliErr := AddToClient(appleTV(), []string{"100", "101", "102"})
 
-	if result["ok"] != false {
-		t.Fatalf("result = %#v", result)
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	if result["added"] != 1 {
-		t.Fatalf("added = %#v, want 1", result["added"])
+	if cliErr == nil || cliErr.Code != output.CodeQueuePartial {
+		t.Fatalf("cliErr = %#v, want CodeQueuePartial", cliErr)
 	}
-	if result["playQueueID"] != "5582" {
-		t.Fatalf("playQueueID = %#v", result["playQueueID"])
+	if cliErr.Data["added"] != 1 {
+		t.Fatalf("added = %#v, want 1", cliErr.Data["added"])
 	}
-	if result["error"] != "add to queue returned unexpected response" {
-		t.Fatalf("error = %#v", result["error"])
+	if cliErr.Data["playQueueID"] != "5582" {
+		t.Fatalf("playQueueID = %#v", cliErr.Data["playQueueID"])
+	}
+	if cliErr.Data["failedKey"] != "101" {
+		t.Fatalf("failedKey = %#v, want 101", cliErr.Data["failedKey"])
+	}
+	if cliErr.Message != "add to queue returned unexpected response" {
+		t.Fatalf("message = %q", cliErr.Message)
 	}
 }
 
+// TestAddToClientDetectsPMSSilentNoOpOnBogusKey pins the NOT_APPLIED
+// verification path (docs/error_model_v2.md §5 / §2): PMS accepted the PUT
+// (2xx) but the queue's size didn't grow, so the ratingKey was silently
+// ignored. Exit 6, not a queue-domain code.
 func TestAddToClientDetectsPMSSilentNoOpOnBogusKey(t *testing.T) {
 	f := newFakePMS(t)
 	queuestate.Save("abc", "5582", "1")
@@ -1036,15 +1199,21 @@ func TestAddToClientDetectsPMSSilentNoOpOnBogusKey(t *testing.T) {
 	f.onSequence("GET", "/playQueues/5582", sizeResp(4), sizeResp(4)) // no growth after add
 	f.onJSON("PUT", "/playQueues/5582", jsonx.J{"MediaContainer": jsonx.J{"playQueueID": "5582"}})
 
-	result := AddToClient(appleTV(), []string{"99999999"})
+	result, cliErr := AddToClient(appleTV(), []string{"99999999"})
 
-	want := jsonx.J{
-		"ok":          false,
-		"error":       "PMS accepted PUT but did not add ratingKey 99999999 — likely unknown or invalid",
-		"added":       0,
-		"playQueueID": "5582",
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
 	}
-	if !reflect.DeepEqual(result, want) {
-		t.Fatalf("result = %#v, want %#v", result, want)
+	if cliErr == nil || cliErr.Code != output.CodeNotApplied {
+		t.Fatalf("cliErr = %#v, want CodeNotApplied", cliErr)
+	}
+	if cliErr.ExitCode() != output.ExitNotApplied {
+		t.Fatalf("exit = %d, want %d", cliErr.ExitCode(), output.ExitNotApplied)
+	}
+	if cliErr.Message != "PMS accepted the add but the queue did not grow — ratingKey likely unknown or invalid" {
+		t.Fatalf("message = %q", cliErr.Message)
+	}
+	if cliErr.Data["ratingKey"] != "99999999" {
+		t.Fatalf("ratingKey = %#v, want 99999999", cliErr.Data["ratingKey"])
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
 
@@ -389,10 +390,9 @@ func TestSmartContentPathReturnsEmptyForMissingMarker(t *testing.T) {
 // --- mutations: create ------------------------------------------------------
 
 func TestCreateEmptyKeysReturnsError(t *testing.T) {
-	got := Create("X", "1", nil)
-	want := jsonx.J{"ok": false, "error": "create requires at least one ratingKey"}
-	if got["ok"] != want["ok"] || got["error"] != want["error"] {
-		t.Fatalf("got %#v, want %#v", got, want)
+	_, err := Create("X", "1", nil)
+	if err == nil || err.Code != output.CodeBadRequest || err.Message != "create requires at least one ratingKey" {
+		t.Fatalf("err = %#v", err)
 	}
 }
 
@@ -400,10 +400,10 @@ func TestCreateNonVideoSectionRejected(t *testing.T) {
 	f := newFakePMS(t)
 	routeServerAndSections(f, fakeSections...)
 
-	result := Create("X", "9", []string{"100"})
+	_, err := Create("X", "9", []string{"100"})
 	want := "section 9 is not a movie or show section"
-	if result["ok"] != false || result["error"] != want {
-		t.Fatalf("got %#v, want error %q", result, want)
+	if err == nil || err.Code != output.CodeBadRequest || err.Message != want {
+		t.Fatalf("err = %#v, want error %q", err, want)
 	}
 }
 
@@ -411,9 +411,9 @@ func TestCreateUnknownSectionRejected(t *testing.T) {
 	f := newFakePMS(t)
 	routeServerAndSections(f, fakeSections...)
 
-	result := Create("X", "99", []string{"100"})
-	if result["ok"] != false {
-		t.Fatalf("ok = %#v, want false", result["ok"])
+	_, err := Create("X", "99", []string{"100"})
+	if err == nil || err.Code != output.CodeBadRequest {
+		t.Fatalf("err = %#v, want BAD_REQUEST", err)
 	}
 }
 
@@ -422,10 +422,10 @@ func TestCreateNoMetadataReturnsExactError(t *testing.T) {
 	routeServerAndSections(f, fakeSections...)
 	f.onJSON("/library/collections", mc()) // POST returns no Metadata items
 
-	result := Create("X", "1", []string{"100"})
+	_, err := Create("X", "1", []string{"100"})
 	want := "collection creation returned no metadata"
-	if result["ok"] != false || result["error"] != want {
-		t.Fatalf("got %#v, want error %q", result, want)
+	if err == nil || err.Code != output.CodeInternal || err.Message != want {
+		t.Fatalf("err = %#v, want error %q", err, want)
 	}
 }
 
@@ -434,10 +434,10 @@ func TestCreateNoRatingKeyReturnsExactError(t *testing.T) {
 	routeServerAndSections(f, fakeSections...)
 	f.onJSON("/library/collections", mc(jsonx.J{"title": "Comfort"})) // item, no ratingKey
 
-	result := Create("X", "1", []string{"100"})
+	_, err := Create("X", "1", []string{"100"})
 	want := "collection creation returned no ratingKey"
-	if result["ok"] != false || result["error"] != want {
-		t.Fatalf("got %#v, want error %q", result, want)
+	if err == nil || err.Code != output.CodeInternal || err.Message != want {
+		t.Fatalf("err = %#v, want error %q", err, want)
 	}
 }
 
@@ -445,10 +445,10 @@ func TestCreateNoServerIDRejected(t *testing.T) {
 	f := newFakePMS(t)
 	f.onStatus("/", 500) // GetServerMachineID -> ""
 
-	result := Create("X", "1", []string{"100"})
+	_, err := Create("X", "1", []string{"100"})
 	want := "could not retrieve server machineIdentifier"
-	if result["ok"] != false || result["error"] != want {
-		t.Fatalf("got %#v", result)
+	if err == nil || err.Code != output.CodeInternal || err.Message != want {
+		t.Fatalf("err = %#v", err)
 	}
 }
 
@@ -457,7 +457,10 @@ func TestCreateSingleKeyPostsAndReturnsRatingKey(t *testing.T) {
 	routeServerAndSections(f, fakeSections...)
 	f.onJSON("/library/collections", mc(jsonx.J{"ratingKey": "777", "title": "Comfort"}))
 
-	result := Create("Comfort", "1", []string{"100"})
+	result, err := Create("Comfort", "1", []string{"100"})
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	want := jsonx.J{"ok": true, "ratingKey": "777", "title": "Comfort", "count": 1}
 	if result["ok"] != want["ok"] || result["ratingKey"] != want["ratingKey"] ||
 		result["title"] != want["title"] || result["count"] != want["count"] {
@@ -482,7 +485,10 @@ func TestCreateMultipleKeysAddsRemainingViaPut(t *testing.T) {
 	f.onJSON("/library/collections", mc(jsonx.J{"ratingKey": "777", "title": "Comfort"}))
 	f.onJSON("/library/collections/777/items", jsonx.J{})
 
-	result := Create("Comfort", "1", []string{"100", "101", "102"})
+	result, err := Create("Comfort", "1", []string{"100", "101", "102"})
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if result["ok"] != true || result["count"] != 3 {
 		t.Fatalf("got %#v", result)
 	}
@@ -493,10 +499,9 @@ func TestCreateMultipleKeysAddsRemainingViaPut(t *testing.T) {
 
 // TestCreateRollsBackOnPartialAddFailure pins W11: the mid-loop add now
 // goes through api.TryPut, so a real HTTP failure on the second item's PUT
-// — not a monkeypatched addItemsFn — reaches the ok:false branch and
-// triggers rollback. Before W11 this was reachable only via the
-// now-removed test-only seam: api.Put print-and-exits, so this exact
-// failure used to kill the test process instead of returning ok:false.
+// — not a monkeypatched addItemsFn — reaches the CodeQueuePartial branch and
+// triggers rollback. v2: the CLIError returned by addItemsInternal is
+// forwarded with partialCollectionID/rollbackAttempted stapled into Data.
 func TestCreateRollsBackOnPartialAddFailure(t *testing.T) {
 	f := newFakePMS(t)
 	routeServerAndSections(f, fakeSections...)
@@ -504,15 +509,18 @@ func TestCreateRollsBackOnPartialAddFailure(t *testing.T) {
 	f.onStatus("/library/collections/777/items", 500)
 	f.onJSON("/library/metadata/777", jsonx.J{}) // TryDelete target
 
-	result := Create("Comfort", "1", []string{"100", "101"})
-	if result["ok"] != false {
-		t.Fatalf("ok = %#v, want false", result["ok"])
+	_, err := Create("Comfort", "1", []string{"100", "101"})
+	if err == nil {
+		t.Fatal("err = nil, want CodeQueuePartial")
 	}
-	if result["partialCollectionID"] != "777" {
-		t.Fatalf("partialCollectionID = %#v, want 777", result["partialCollectionID"])
+	if err.Code != output.CodeQueuePartial {
+		t.Fatalf("code = %q, want %q", err.Code, output.CodeQueuePartial)
 	}
-	if result["rollbackAttempted"] != true {
-		t.Fatalf("rollbackAttempted = %#v, want true", result["rollbackAttempted"])
+	if err.Data["partialCollectionID"] != "777" {
+		t.Fatalf("partialCollectionID = %#v, want 777", err.Data["partialCollectionID"])
+	}
+	if err.Data["rollbackAttempted"] != true {
+		t.Fatalf("rollbackAttempted = %#v, want true", err.Data["rollbackAttempted"])
 	}
 	if f.methodCallCount("DELETE", "/library/metadata/777") != 1 {
 		t.Fatal("rollback must DELETE /library/metadata/777 exactly once")
@@ -531,12 +539,12 @@ func TestCreateRollsBackOnTransportFailure(t *testing.T) {
 	})
 	f.onJSON("/library/metadata/777", jsonx.J{}) // TryDelete target
 
-	result := Create("Comfort", "1", []string{"100", "101"})
-	if result["ok"] != false {
-		t.Fatalf("ok = %#v, want false", result["ok"])
+	_, err := Create("Comfort", "1", []string{"100", "101"})
+	if err == nil {
+		t.Fatal("err = nil, want CodeQueuePartial")
 	}
-	if result["rollbackAttempted"] != true {
-		t.Fatalf("rollbackAttempted = %#v, want true", result["rollbackAttempted"])
+	if err.Data["rollbackAttempted"] != true {
+		t.Fatalf("rollbackAttempted = %#v, want true", err.Data["rollbackAttempted"])
 	}
 	if f.methodCallCount("DELETE", "/library/metadata/777") != 1 {
 		t.Fatal("rollback must DELETE /library/metadata/777 exactly once")
@@ -575,7 +583,10 @@ func TestRenameLocksTitle(t *testing.T) {
 		return 200, mc(jsonx.J{"smart": false})
 	})
 
-	got := Rename("777", "New Name")
+	got, err := Rename("777", "New Name")
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if got["ok"] != true {
 		t.Fatalf("got %#v", got)
 	}
@@ -592,7 +603,10 @@ func TestAddItemsLoopsPerKey(t *testing.T) {
 	notSmart(f, "777")
 	f.onJSON("/library/collections/777/items", jsonx.J{})
 
-	result := AddItems("777", []string{"100", "101", "102"})
+	result, err := AddItems("777", []string{"100", "101", "102"})
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	want := jsonx.J{"ok": true, "added": 3}
 	if result["ok"] != want["ok"] || result["added"] != want["added"] {
 		t.Fatalf("got %#v", result)
@@ -603,9 +617,46 @@ func TestAddItemsLoopsPerKey(t *testing.T) {
 }
 
 func TestAddItemsEmptyRejected(t *testing.T) {
-	got := AddItems("777", nil)
-	if got["ok"] != false || got["error"] != "add requires at least one ratingKey" {
-		t.Fatalf("got %#v", got)
+	_, err := AddItems("777", nil)
+	if err == nil || err.Code != output.CodeBadRequest || err.Message != "add requires at least one ratingKey" {
+		t.Fatalf("err = %#v", err)
+	}
+}
+
+// TestAddItemsPartialFailureReportsAddedAndFailedKey pins the v2
+// CodeQueuePartial contract on the public AddItems entry point directly
+// (not via Create's mid-loop rollback, which always adds one item at a
+// time and so never accumulates added > 1): the first PUT succeeds, the
+// second fails, and the CLIError must carry added:1 and the exact key that
+// failed, plus the retry hint.
+func TestAddItemsPartialFailureReportsAddedAndFailedKey(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("/", rootResp("MID"))
+	notSmart(f, "777")
+	var calls int
+	f.on("/library/collections/777/items", func(r *http.Request) (int, any) {
+		calls++
+		if calls == 1 {
+			return 200, jsonx.J{}
+		}
+		return 500, nil
+	})
+
+	_, err := AddItems("777", []string{"100", "101", "102"})
+	if err == nil {
+		t.Fatal("err = nil, want CodeQueuePartial")
+	}
+	if err.Code != output.CodeQueuePartial {
+		t.Fatalf("code = %q, want %q", err.Code, output.CodeQueuePartial)
+	}
+	if err.Data["added"] != 1 {
+		t.Fatalf("added = %#v, want 1", err.Data["added"])
+	}
+	if err.Data["failedKey"] != "101" {
+		t.Fatalf("failedKey = %#v, want 101", err.Data["failedKey"])
+	}
+	if err.Hint != "retry with the remaining items" {
+		t.Fatalf("hint = %q", err.Hint)
 	}
 }
 
@@ -614,7 +665,10 @@ func TestRemoveItemUsesDelete(t *testing.T) {
 	notSmart(f, "777")
 	f.onJSON("/library/collections/777/items/100", jsonx.J{})
 
-	got := RemoveItem("777", "100")
+	got, err := RemoveItem("777", "100")
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if got["ok"] != true {
 		t.Fatalf("got %#v", got)
 	}
@@ -635,9 +689,15 @@ func TestAddItemsRefusesSmartCollection(t *testing.T) {
 	f := newFakePMS(t)
 	asSmart(f, "777")
 
-	result := AddItems("777", []string{"100"})
-	if result["ok"] != false || result["error"] != wantSmartRefusal {
-		t.Fatalf("got %#v", result)
+	_, err := AddItems("777", []string{"100"})
+	if err == nil || err.Code != output.CodeSmartContainer || err.Message != wantSmartRefusal {
+		t.Fatalf("err = %#v", err)
+	}
+	if err.Data["kind"] != "collection" {
+		t.Fatalf("kind = %#v, want collection", err.Data["kind"])
+	}
+	if err.Hint != "edit the smart rule in the Plex app" {
+		t.Fatalf("hint = %q", err.Hint)
 	}
 	if f.callCount("/library/collections/777/items") != 0 {
 		t.Fatal("no PUT should fire when refused")
@@ -648,22 +708,32 @@ func TestRemoveItemRefusesSmartCollection(t *testing.T) {
 	f := newFakePMS(t)
 	asSmart(f, "777")
 
-	result := RemoveItem("777", "100")
-	if result["ok"] != false || result["error"] != wantSmartRefusal {
-		t.Fatalf("got %#v", result)
+	_, err := RemoveItem("777", "100")
+	if err == nil || err.Code != output.CodeSmartContainer || err.Message != wantSmartRefusal {
+		t.Fatalf("err = %#v", err)
+	}
+	if err.Data["kind"] != "collection" {
+		t.Fatalf("kind = %#v, want collection", err.Data["kind"])
 	}
 	if f.callCount("/library/collections/777/items/100") != 0 {
 		t.Fatal("no DELETE should fire when refused")
 	}
 }
 
+// TestRenameRefusesSmartCollection pins a gap in error_inventory.md (row 5
+// there claims Rename has no local ok:false branch — the code disagrees):
+// Rename does consult isSmart and must refuse with the same
+// PLEX_SMART_CONTAINER code as add/remove.
 func TestRenameRefusesSmartCollection(t *testing.T) {
 	f := newFakePMS(t)
 	asSmart(f, "777")
 
-	result := Rename("777", "New")
-	if result["ok"] != false || result["error"] != wantSmartRefusal {
-		t.Fatalf("got %#v", result)
+	_, err := Rename("777", "New")
+	if err == nil || err.Code != output.CodeSmartContainer || err.Message != wantSmartRefusal {
+		t.Fatalf("err = %#v", err)
+	}
+	if err.Data["kind"] != "collection" {
+		t.Fatalf("kind = %#v, want collection", err.Data["kind"])
 	}
 	if f.methodCallCount("PUT", "/library/metadata/777") != 0 {
 		t.Fatal("no PUT should fire when refused")
@@ -690,7 +760,10 @@ func TestCreateLoopSkipsSmartCheck(t *testing.T) {
 	asSmart(f, "777")
 	f.onJSON("/library/collections/777/items", jsonx.J{})
 
-	result := Create("Comfort", "1", []string{"100", "101"})
+	result, err := Create("Comfort", "1", []string{"100", "101"})
+	if err != nil {
+		t.Fatalf("err = %#v", err)
+	}
 	if result["ok"] != true {
 		t.Fatalf("got %#v, want ok:true (trustManual must bypass isSmart)", result)
 	}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/commands"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
 
@@ -48,6 +49,12 @@ func TestSeekTimeoutFlagAppliesOverrideInsteadOfJoiningPosition(t *testing.T) {
 	got := mustUnmarshal(t, out)
 	if got["ok"] != true {
 		t.Fatalf("expected ok:true (--timeout consumed, position is '1:30'), got %#v (out=%s)", got, out)
+	}
+	// v2 (docs/error_model_v2.md §6): seek success reports the resulting
+	// playState -- here the session was already "playing" and unpause left
+	// it that way (no pause/resume dance needed).
+	if got["playState"] != "playing" {
+		t.Fatalf("playState = %v, want playing (out=%s)", got["playState"], out)
 	}
 	if gotTimeout := api.DefaultTimeout(); gotTimeout != 5 {
 		t.Fatalf("timeout override = %v, want 5", gotTimeout)
@@ -110,7 +117,9 @@ func TestSeekBareDashHJoinsPositionInsteadOfTriggeringHelp(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1 (not help output); out=%s", code, out)
 	}
-	want := `{"error":"unrecognised position format: '1:30 -h'","ok":false}`
+	// v2: unrecognised position format is CodeBadRequest, exit 1 (unchanged
+	// exit class), structured envelope instead of v1's flat {"error",...}.
+	want := `{"error":{"code":"BAD_REQUEST","message":"unrecognised position format: '1:30 -h'"},"ok":false}`
 	if got := trimNL(out); got != want {
 		t.Fatalf("out = %q, want %q", got, want)
 	}
@@ -126,7 +135,7 @@ func TestSeekDashDashEndsFlagRecognitionButTokenJoinsPosition(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; out=%s", code, out)
 	}
-	want := `{"error":"unrecognised position format: '1:30 --no-unpause'","ok":false}`
+	want := `{"error":{"code":"BAD_REQUEST","message":"unrecognised position format: '1:30 --no-unpause'"},"ok":false}`
 	if got := trimNL(out); got != want {
 		t.Fatalf("out = %q, want %q", got, want)
 	}
@@ -303,5 +312,61 @@ func TestSeekNoArgsIsUsageError(t *testing.T) {
 	}
 	if out != "" {
 		t.Errorf("expected no stdout JSON, got %q", out)
+	}
+}
+
+// --- volume: unconditional refusal (v2) ---------------------------------
+//
+// docs/error_model_v2.md §2 CodeUnsupported row: the Apple TV Companion
+// listener accepts a setParameters volume command and silently ignores it,
+// so v1's "success" was theater. v2 refuses immediately, in the binary,
+// before any client resolution or Companion round trip.
+
+// TestVolumeRefusedNoHTTP proves the refusal never touches the network at
+// all: not the Companion setParameters call (already gone with SetVolume),
+// and not even client resolution (/clients, /devices.json) — the fake
+// server sees zero requests of any kind.
+func TestVolumeRefusedNoHTTP(t *testing.T) {
+	f := newFakePMS(t)
+	// Deliberately NOT calling f.resolvableClient(t): if volume's refusal
+	// ever regresses into resolving a client first, the fake server has no
+	// /clients or /devices.json route wired and the test would fail loudly
+	// via an unexpected-request 404, not silently pass.
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"volume", "50"})
+	out, code := testutil.Capture(t, func() { _ = root.Execute() })
+
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (CodeUnsupported -> ExitPlex); out=%s", code, out)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != false {
+		t.Fatalf("expected ok:false, got %#v (out=%s)", got, out)
+	}
+	errBody, _ := got["error"].(map[string]any)
+	if errBody["code"] != output.CodeUnsupported {
+		t.Fatalf("error.code = %v, want %s (out=%s)", errBody["code"], output.CodeUnsupported, out)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("fake server saw %d request(s), want 0: %#v", len(f.calls), f.calls)
+	}
+}
+
+// TestVolumeBadLevelStillUsageError proves the refusal doesn't mask LEVEL's
+// own range validation -- a malformed LEVEL is still a cobra usage error,
+// never reaching the CodeUnsupported refusal.
+func TestVolumeBadLevelStillUsageError(t *testing.T) {
+	_ = newFakePMS(t)
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"volume", "150"})
+	var err error
+	out, code := testutil.Capture(t, func() { err = root.Execute() })
+	if err == nil {
+		t.Fatalf("expected a usage error for LEVEL=150, got nil")
+	}
+	if code != -1 {
+		t.Fatalf("exit = %d, want -1 (usage error never reaches output.Exit); out=%s", code, out)
 	}
 }

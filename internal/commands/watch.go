@@ -53,7 +53,7 @@ func newWatchedCmd() *cobra.Command {
 		}
 		key, ok := resolveTargetKey(target, explicit)
 		if !ok {
-			output.Out(jsonx.J{"ok": false, "error": "nothing playing — provide a ratingKey"})
+			output.FailErr(output.Err(output.CodeNothingPlaying, "nothing playing — provide a ratingKey").WithHint("provide a ratingKey"))
 			return nil
 		}
 		output.Out(library.Scrobble(key))
@@ -77,7 +77,7 @@ func newUnwatchedCmd() *cobra.Command {
 		}
 		key, ok := resolveTargetKey(target, explicit)
 		if !ok {
-			output.Out(jsonx.J{"ok": false, "error": "nothing playing — provide a ratingKey"})
+			output.FailErr(output.Err(output.CodeNothingPlaying, "nothing playing — provide a ratingKey").WithHint("provide a ratingKey"))
 			return nil
 		}
 		output.Out(library.Unscrobble(key))
@@ -105,7 +105,7 @@ func newRateCmd() *cobra.Command {
 		}
 		key, ok := resolveTargetKey(target, explicit)
 		if !ok {
-			output.Out(jsonx.J{"ok": false, "error": "nothing playing — provide a ratingKey"})
+			output.FailErr(output.Err(output.CodeNothingPlaying, "nothing playing — provide a ratingKey").WithHint("provide a ratingKey"))
 			return nil
 		}
 		output.Out(library.Rate(key, rating))

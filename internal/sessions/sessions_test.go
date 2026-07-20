@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/queuestate"
 	"github.com/corinthian/plexctl/internal/sessions"
 	"github.com/corinthian/plexctl/internal/testutil"
@@ -336,7 +337,10 @@ func TestContextHappyPathBundlesAllSections(t *testing.T) {
 	f.onJSON("/library/metadata/44725", metadataPayload("44725", 6381245, 1983))
 	f.onJSON("/library/metadata/44900", metadataPayload("44900", 1320000, 2018))
 
-	result := sessions.Context(testClient(), 5, true)
+	result, failure := sessions.Context(testClient(), 5, true)
+	if failure != nil {
+		t.Fatalf("failure = %#v, want nil (all sections succeeded)", failure)
+	}
 
 	if result["ok"] != true {
 		t.Fatalf("ok = %#v, want true", result["ok"])
@@ -393,7 +397,10 @@ func TestContextNoHistorySkipsHistoryKey(t *testing.T) {
 	f.onJSON("/status/sessions", mc(jsonx.J{"Metadata": anyList()}))
 	f.onJSON("/playQueues/5594", mc(jsonx.J{"Metadata": anyList()}))
 
-	result := sessions.Context(testClient(), 5, false)
+	result, failure := sessions.Context(testClient(), 5, false)
+	if failure != nil {
+		t.Fatalf("failure = %#v, want nil", failure)
+	}
 
 	if _, ok := result["history"]; ok {
 		t.Fatalf("result = %#v, must not carry history key when includeHistory=false", result)
@@ -409,7 +416,10 @@ func TestContextEmptyQueueWhenNoStateEntry(t *testing.T) {
 	f.onJSON("/status/sessions", mc(jsonx.J{"Metadata": anyList()}))
 	f.onJSON("/status/sessions/history/all", mc(jsonx.J{"Metadata": anyList()}))
 
-	result := sessions.Context(testClient(), 5, true)
+	result, failure := sessions.Context(testClient(), 5, true)
+	if failure != nil {
+		t.Fatalf("failure = %#v, want nil", failure)
+	}
 
 	q := result["queue"].(jsonx.J)
 	if q["ok"] != true || q["state"] != "empty" {
@@ -430,7 +440,10 @@ func TestContextStaleQidWithEmptyPMSQueueReturnsEmptyStateWithStringQid(t *testi
 	f.onJSON("/playQueues/5594", mc(jsonx.J{"Metadata": anyList()})) // queue emptied server-side
 	f.onJSON("/status/sessions/history/all", mc(jsonx.J{"Metadata": anyList()}))
 
-	result := sessions.Context(testClient(), 5, true)
+	result, failure := sessions.Context(testClient(), 5, true)
+	if failure != nil {
+		t.Fatalf("failure = %#v, want nil", failure)
+	}
 
 	q := result["queue"].(jsonx.J)
 	if q["ok"] != true || q["state"] != "empty" {
@@ -451,7 +464,10 @@ func TestContextIdleNowPlayingWhenSessionBelongsToOtherClient(t *testing.T) {
 	)}))
 	f.onJSON("/status/sessions/history/all", mc(jsonx.J{"Metadata": anyList()}))
 
-	result := sessions.Context(testClient(), 5, true)
+	result, failure := sessions.Context(testClient(), 5, true)
+	if failure != nil {
+		t.Fatalf("failure = %#v, want nil (idle is not a failure)", failure)
+	}
 
 	np := result["nowPlaying"].(jsonx.J)
 	if np["ok"] != true || np["state"] != "idle" {
@@ -465,10 +481,14 @@ func TestContextIdleNowPlayingWhenSessionBelongsToOtherClient(t *testing.T) {
 	}
 }
 
-func TestContextQueueFailureDegradesSectionOnlyTopLevelTracksNowPlaying(t *testing.T) {
-	// A non-404 server error on the queue read degrades that section to
-	// ok:false but leaves the top-level ok tracking nowPlaying. (404 is a
-	// distinct path now — see TestContextStaleQueue404KeepsStateAndDegradesToEmpty.)
+func TestContextQueueFailureFlipsTopLevelOkAndReturnsItsExitClass(t *testing.T) {
+	// v2: a non-404 server error on the queue read degrades that section to
+	// a coded ok:false, and now (unlike v1) also flips the top-level ok —
+	// top-level ok is the AND of every fetched section, not now-playing
+	// alone. The returned failure is the queue section's CLIError so the
+	// command layer can exit with its class. (404 is a distinct path — see
+	// TestContextStaleQueue404KeepsStateAndDegradesToEmpty — that one stays
+	// ok:true because a pruned queue self-heals to "empty", not a failure.)
 	f := newFakePMS(t)
 	queuestate.Save(client1, "5594", "43652")
 	f.onJSON("/status/sessions", mc(jsonx.J{"Metadata": anyList(
@@ -477,10 +497,10 @@ func TestContextQueueFailureDegradesSectionOnlyTopLevelTracksNowPlaying(t *testi
 	f.onStatus("/playQueues/5594", 500)
 	f.onJSON("/status/sessions/history/all", mc(jsonx.J{"Metadata": anyList()}))
 
-	result := sessions.Context(testClient(), 5, true)
+	result, failure := sessions.Context(testClient(), 5, true)
 
-	if result["ok"] != true {
-		t.Fatalf("top-level ok = %#v, want true (nowPlaying succeeded)", result["ok"])
+	if result["ok"] != false {
+		t.Fatalf("top-level ok = %#v, want false (queue section failed)", result["ok"])
 	}
 	if result["nowPlaying"].(jsonx.J)["ok"] != true {
 		t.Fatalf("nowPlaying = %#v, want ok:true", result["nowPlaying"])
@@ -489,8 +509,18 @@ func TestContextQueueFailureDegradesSectionOnlyTopLevelTracksNowPlaying(t *testi
 	if q["ok"] != false {
 		t.Fatalf("queue = %#v, want ok:false", q)
 	}
-	if errStr, _ := q["error"].(string); errStr == "" {
-		t.Fatalf("queue error missing: %#v", q)
+	errBody, ok := q["error"].(jsonx.J)
+	if !ok {
+		t.Fatalf("queue.error = %#v, want a coded object", q["error"])
+	}
+	if errBody["code"] != output.CodeServerError {
+		t.Fatalf("queue.error.code = %#v, want %s", errBody["code"], output.CodeServerError)
+	}
+	if failure == nil {
+		t.Fatalf("failure = nil, want the queue section's CLIError")
+	}
+	if failure.ExitCode() != output.ExitPlex {
+		t.Fatalf("failure.ExitCode() = %d, want %d (ExitPlex)", failure.ExitCode(), output.ExitPlex)
 	}
 }
 
@@ -509,7 +539,10 @@ func TestContextStaleQueue404KeepsStateAndDegradesToEmpty(t *testing.T) {
 		jsonx.J{"title": "Citizen Kane", "type": "movie", "viewedAt": float64(1778844492), "ratingKey": "44725", "duration": float64(6381245), "year": float64(1983)},
 	)}))
 
-	result := sessions.Context(testClient(), 5, true)
+	result, failure := sessions.Context(testClient(), 5, true)
+	if failure != nil {
+		t.Fatalf("failure = %#v, want nil (404 self-heals to empty, not a failure)", failure)
+	}
 
 	if result["ok"] != true {
 		t.Fatalf("top-level ok = %#v, want true", result["ok"])
@@ -542,7 +575,7 @@ func TestContextNowPlayingFailureMarksTopLevelNotOk(t *testing.T) {
 	f.onStatus("/status/sessions", 500)
 	f.onJSON("/status/sessions/history/all", mc(jsonx.J{"Metadata": anyList()}))
 
-	result := sessions.Context(testClient(), 5, true)
+	result, failure := sessions.Context(testClient(), 5, true)
 
 	if result["ok"] != false {
 		t.Fatalf("top-level ok = %#v, want false", result["ok"])
@@ -551,7 +584,14 @@ func TestContextNowPlayingFailureMarksTopLevelNotOk(t *testing.T) {
 	if np["ok"] != false {
 		t.Fatalf("nowPlaying = %#v, want ok:false", np)
 	}
-	if errStr, _ := np["error"].(string); errStr == "" {
-		t.Fatalf("nowPlaying error missing: %#v", np)
+	errBody, ok := np["error"].(jsonx.J)
+	if !ok {
+		t.Fatalf("nowPlaying.error = %#v, want a coded object", np["error"])
+	}
+	if errBody["code"] != output.CodeServerError {
+		t.Fatalf("nowPlaying.error.code = %#v, want %s", errBody["code"], output.CodeServerError)
+	}
+	if failure == nil || failure.Code != output.CodeServerError {
+		t.Fatalf("failure = %#v, want the nowPlaying section's CLIError (code %s)", failure, output.CodeServerError)
 	}
 }

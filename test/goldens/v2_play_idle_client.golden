@@ -1,0 +1,6 @@
+{
+  "argv": ["plexctl", "play"],
+  "stdout": "{\"error\":{\"code\":\"NOT_APPLIED\",\"hint\":\"start items with: plexctl play-media RATING_KEY\",\"message\":\"client accepted play but nothing started — play only resumes; it cannot start an idle client\"},\"ok\":false}\n",
+  "exit_code": 6,
+  "note": "v2 shape (docs/error_model_v2.md §5): the idle-play invariant. play's Companion accept still gets a 200 (f.onStatus play 200, as v1), but /status/sessions comes back empty on both engagement-poll tries (EngagePollDelay zeroed for the test, so no real sleep) -- so the accept is reported as a no-op: NOT_APPLIED, exit 6, hint names play-media. Supersedes v1_play_idle_client.golden (git history, ok:true) after playback.Play gained the idle-play verification poll."
+}

@@ -77,18 +77,27 @@ func TestLoadMissingFileIsEmpty(t *testing.T) {
 	}
 }
 
-func TestLoadInvalidTOMLExitsOne(t *testing.T) {
+// TestLoadInvalidTOMLExitsFive pins the v2 error-model contract (P2-A):
+// corrupt config is PLEX_AUTH_REQUIRED (the caller isn't authenticated with
+// a usable config), exit 5 — not the v1 free-text exit 1.
+func TestLoadInvalidTOMLExitsFive(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("not = = toml"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, code := testutil.Capture(t, func() { config.Load() })
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
+	if code != 5 {
+		t.Fatalf("exit = %d, want 5", code)
+	}
+	if !strings.Contains(out, `"code":"PLEX_AUTH_REQUIRED"`) {
+		t.Fatalf("error code drifted: %q", out)
 	}
 	if !strings.Contains(out, "invalid config at") || !strings.Contains(out, "run plexctl auth login") {
 		t.Fatalf("error message drifted: %q", out)
+	}
+	if !strings.Contains(out, `"hint":"run: plexctl auth login"`) {
+		t.Fatalf("hint drifted: %q", out)
 	}
 }
 
@@ -141,13 +150,22 @@ func TestSaveTightensDirMode(t *testing.T) {
 	}
 }
 
-func TestRequireMissingExitsOne(t *testing.T) {
+// TestRequireMissingExitsFive pins the v2 error-model contract (P2-A):
+// missing config key is PLEX_AUTH_REQUIRED, exit 5 — not the v1 free-text
+// exit 1.
+func TestRequireMissingExitsFive(t *testing.T) {
 	t.Setenv("PLEXCTL_CONFIG_DIR", t.TempDir())
 	out, code := testutil.Capture(t, func() { config.Require("token") })
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
+	if code != 5 {
+		t.Fatalf("exit = %d, want 5", code)
+	}
+	if !strings.Contains(out, `"code":"PLEX_AUTH_REQUIRED"`) {
+		t.Fatalf("error code drifted: %q", out)
 	}
 	if !strings.Contains(out, "missing config key: token — run plexctl auth login") {
 		t.Fatalf("error message drifted: %q", out)
+	}
+	if !strings.Contains(out, `"hint":"run: plexctl auth login"`) {
+		t.Fatalf("hint drifted: %q", out)
 	}
 }

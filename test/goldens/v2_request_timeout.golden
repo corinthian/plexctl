@@ -1,0 +1,6 @@
+{
+  "argv": ["plexctl", "now-playing"],
+  "stdout": "{\"error\":{\"code\":\"TRANSPORT_TIMEOUT\",\"hint\":\"retry — on batches, retry only timed-out items\",\"message\":\"request timed out: Get \\\"http://<SERVER>/status/sessions\\\": <TIMEOUT-REASON>\"},\"ok\":false}\n",
+  "exit_code": 3,
+  "note": "v2 shape (docs/error_model_v2.md): TRANSPORT_TIMEOUT, exit 3, structured error envelope. Same two nondeterministic spans normalized as the retired v1 fixture: httptest host:port -> <SERVER>, racy Go client-timeout leading clause -> <TIMEOUT-REASON>. Supersedes v1_request_timeout.golden (git history) after the ExitOnError chokepoint migrated."
+}

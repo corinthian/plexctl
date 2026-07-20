@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/corinthian/plexctl/internal/jsonx"
@@ -206,16 +207,26 @@ func sampleClients() []jsonx.J {
 }
 
 func TestResolveInAmbiguousByName(t *testing.T) {
+	// v2 (docs/error_model_v2.md): ambiguous client name -> PLEX_CLIENT_AMBIGUOUS,
+	// exit 2, structured envelope with matches under data.
 	clientList := sampleClients()
 	out, code := testutil.Capture(t, func() {
 		resolveIn(clientList, "Apple TV")
 	})
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
 	}
-	want := `{"error":"ambiguous client name 'Apple TV' — multiple active devices share this name; specify by machineIdentifier","ok":false}`
-	if got := trimmed(out); got != want {
-		t.Fatalf("out = %q, want %q", got, want)
+	if !strings.Contains(out, `"code":"PLEX_CLIENT_AMBIGUOUS"`) {
+		t.Fatalf("code drifted: %q", out)
+	}
+	if !strings.Contains(out, `"message":"ambiguous client name 'Apple TV' — multiple active devices share this name; specify by machineIdentifier"`) {
+		t.Fatalf("message drifted: %q", out)
+	}
+	if !strings.Contains(out, `"hint":"target by machineIdentifier — run: plexctl clients"`) {
+		t.Fatalf("hint drifted: %q", out)
+	}
+	if !strings.Contains(out, `"data":{"matches":[{"machineIdentifier":"mid-1","name":"Apple TV"}]}`) {
+		t.Fatalf("data drifted: %q", out)
 	}
 }
 
@@ -234,30 +245,48 @@ func TestResolveInByMachineIdentifierBypassesAmbiguous(t *testing.T) {
 }
 
 func TestResolveInRegisteredButNotActive(t *testing.T) {
+	// v2: registered-but-inactive -> PLEX_CLIENT_INACTIVE, exit 2.
 	clientList := sampleClients()
 	out, code := testutil.Capture(t, func() {
 		resolveIn(clientList, "Safari")
 	})
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
 	}
-	want := `{"error":"'Safari' is registered but not active — open the Plex app","ok":false}`
-	if got := trimmed(out); got != want {
-		t.Fatalf("out = %q, want %q", got, want)
+	if !strings.Contains(out, `"code":"PLEX_CLIENT_INACTIVE"`) {
+		t.Fatalf("code drifted: %q", out)
+	}
+	if !strings.Contains(out, `"message":"'Safari' is registered but not active — open the Plex app"`) {
+		t.Fatalf("message drifted: %q", out)
+	}
+	if !strings.Contains(out, `"hint":"open (or relaunch) Plex on the device, then retry"`) {
+		t.Fatalf("hint drifted: %q", out)
+	}
+	if !strings.Contains(out, `"data":{"client":"Safari"}`) {
+		t.Fatalf("data drifted: %q", out)
 	}
 }
 
 func TestResolveInClientNotFound(t *testing.T) {
+	// v2: no match at all -> PLEX_CLIENT_UNKNOWN, exit 2.
 	clientList := sampleClients()
 	out, code := testutil.Capture(t, func() {
 		resolveIn(clientList, "Roku")
 	})
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
 	}
-	want := `{"error":"client not found: Roku","ok":false}`
-	if got := trimmed(out); got != want {
-		t.Fatalf("out = %q, want %q", got, want)
+	if !strings.Contains(out, `"code":"PLEX_CLIENT_UNKNOWN"`) {
+		t.Fatalf("code drifted: %q", out)
+	}
+	if !strings.Contains(out, `"message":"client not found: Roku"`) {
+		t.Fatalf("message drifted: %q", out)
+	}
+	if !strings.Contains(out, `"hint":"run: plexctl clients"`) {
+		t.Fatalf("hint drifted: %q", out)
+	}
+	if !strings.Contains(out, `"data":{"client":"Roku"}`) {
+		t.Fatalf("data drifted: %q", out)
 	}
 }
 
@@ -283,18 +312,16 @@ func TestResolveInPass2BailsAmbiguousRegardlessOfMID(t *testing.T) {
 	out, code := testutil.Capture(t, func() {
 		resolveIn(clientList, "apple tv")
 	})
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
 	}
-	want := `{"error":"ambiguous client name 'Apple TV' — multiple active devices share this name; specify by machineIdentifier","ok":false}`
-	if got := trimmed(out); got != want {
-		t.Fatalf("out = %q, want %q", got, want)
+	if !strings.Contains(out, `"code":"PLEX_CLIENT_AMBIGUOUS"`) {
+		t.Fatalf("code drifted: %q", out)
 	}
-}
-
-func trimmed(s string) string {
-	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
-		s = s[:len(s)-1]
+	if !strings.Contains(out, `"message":"ambiguous client name 'Apple TV' — multiple active devices share this name; specify by machineIdentifier"`) {
+		t.Fatalf("message drifted: %q", out)
 	}
-	return s
+	if !strings.Contains(out, `"data":{"matches":[{"machineIdentifier":"mid-1","name":"Apple TV"}]}`) {
+		t.Fatalf("data drifted: %q", out)
+	}
 }

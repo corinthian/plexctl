@@ -1,0 +1,5 @@
+10:37:06 | context --history-limit 5
+10:37:10 | episodes Black Books --unwatched --json
+10:37:19 | queue 71501 71502 71503
+10:37:25 | pause
+10:37:38 | now-playing

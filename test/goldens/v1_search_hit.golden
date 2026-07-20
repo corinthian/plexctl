@@ -1,0 +1,5 @@
+{
+  "argv": ["plexctl", "search", "The Birds"],
+  "stdout": "{\"ok\":true,\"results\":[{\"ratingKey\":\"100301\",\"title\":\"The Birds\",\"type\":\"movie\",\"year\":1963}]}\n",
+  "exit_code": 0
+}

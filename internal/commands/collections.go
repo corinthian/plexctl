@@ -70,7 +70,12 @@ func newCollectionCreateCmd() *cobra.Command {
 		Short: "Create a manual collection in SECTION_ID titled TITLE, seeded with one or more RATING_KEYS.",
 		Args:  cobra.MinimumNArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			output.Out(collections.Create(args[0], args[1], args[2:]))
+			result, cliErr := collections.Create(args[0], args[1], args[2:])
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
@@ -94,7 +99,12 @@ func newCollectionRenameCmd() *cobra.Command {
 		Short: "Rename a collection to NEW_TITLE.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			output.Out(collections.Rename(args[0], args[1]))
+			result, cliErr := collections.Rename(args[0], args[1])
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
@@ -106,7 +116,12 @@ func newCollectionAddCmd() *cobra.Command {
 		Short: "Add one or more RATING_KEYS to the collection identified by COLLECTION_KEY.",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			output.Out(collections.AddItems(args[0], args[1:]))
+			result, cliErr := collections.AddItems(args[0], args[1:])
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
@@ -118,7 +133,12 @@ func newCollectionRemoveCmd() *cobra.Command {
 		Short: "Remove ITEM_RATING_KEY from the collection identified by COLLECTION_KEY.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			output.Out(collections.RemoveItem(args[0], args[1]))
+			result, cliErr := collections.RemoveItem(args[0], args[1])
+			if cliErr != nil {
+				output.FailErr(cliErr)
+				return nil
+			}
+			output.Out(result)
 			return nil
 		},
 	}
