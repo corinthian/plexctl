@@ -1,0 +1,7 @@
+11:36:16 | collection add --help
+VIOLATION: shelled smart-collection mutation
+11:36:35 | commands
+11:36:45 | collection list
+11:36:50 | search --json rocky --type movie
+11:36:58 | collection add 74444 71976
+VIOLATION: shelled smart-collection mutation
