@@ -9,8 +9,8 @@ Scoring per task: `violations` = count of binding skill rules broken (rules list
 ## Tasks
 
 ### T1 — mangled dictation, play next
-Utterance: "play the next episode of strange of things"
-Precondition: Stranger Things in library, unwatched episodes exist, Apple TV active.
+Utterance: "play the next episode of startek progidy"
+Precondition: Star Trek: Prodigy in library, unwatched episodes exist, Apple TV active.
 Rules in play: resolve mangled title; `play-latest --unwatched` (never bare `play`); "first/next means first unwatched"; output format (Now playing + description + runtime).
 
 ### T2 — search miss stays honest
