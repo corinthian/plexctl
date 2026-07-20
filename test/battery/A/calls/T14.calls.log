@@ -1,0 +1,3 @@
+10:52:53 | set-audio --show Dark --language deu --dry-run --all-seasons
+10:52:59 | set-audio --show Dark --language deu --all-seasons
+REAL-WRITE-INTERCEPTED: set-audio --show Dark --language deu --all-seasons

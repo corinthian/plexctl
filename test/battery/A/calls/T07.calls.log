@@ -1,0 +1,6 @@
+10:42:33 | context --history-limit 5
+10:42:43 | queue-show
+10:42:49 | play-media 44792
+10:42:53 | now-playing
+10:43:13 | metadata 44792
+10:43:31 | metadata 44792
