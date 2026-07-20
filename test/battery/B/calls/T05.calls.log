@@ -1,0 +1,5 @@
+11:18:54 | play-latest --unwatched --key-only slow horses
+11:18:58 | queue 71111
+11:19:07 | queue-start
+11:19:15 | now-playing
+11:19:20 | pause

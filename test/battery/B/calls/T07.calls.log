@@ -1,0 +1,9 @@
+11:22:17 | play
+NOT_APPLIED: bare play on idle
+11:22:22 | queue-show
+11:22:30 | search --json Murder in Mobile --type episode
+11:22:38 | play-media 44792
+11:22:42 | now-playing
+11:22:53 | metadata 44792
+11:23:09 | metadata 44792
+11:23:30 | episodes After the First 48 --season 9 --json

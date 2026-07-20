@@ -1,0 +1,5 @@
+11:30:49 | --version
+11:30:53 | library sections --json
+11:30:53 | library list --json
+11:30:58 | library sections
+11:31:02 | library list --section 3 --type show

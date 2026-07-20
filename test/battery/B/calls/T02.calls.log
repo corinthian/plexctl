@@ -1,0 +1,9 @@
+11:11:23 | search --json The Godfather
+11:11:29 | library list --type movie --json
+11:11:34 | library list --type movie
+11:11:48 | library --help
+11:11:52 | library sections
+11:11:58 | library list --section 1
+11:12:25 | library list --section 3
+11:15:25 | library list --type movie --json
+11:15:28 | library --help
