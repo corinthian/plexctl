@@ -5,9 +5,9 @@ ERROR payload to its v2 envelope. Success shapes are unchanged (v2 kept flat
 success envelopes). Same titles, ratingKeys, and interception points as A."""
 import json, os, re, subprocess
 
-B = "/Users/rlarsen/.claude/jobs/08fe1310/tmp/battery"
+B = os.environ.get("BATTERY_DIR", "battery")
 PAY = f"{B}/payloads"; SHIMS = f"{B}/shims"
-V2 = "/Users/rlarsen/Projects/plexctl/dist/plexctl"
+V2 = os.environ.get("PLEXCTL_V2", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "dist", "plexctl"))
 
 subprocess.run(["python3", f"{B}/build_battery.py"], check=True)
 os.makedirs(f"{B}/logs-b", exist_ok=True)
@@ -23,7 +23,7 @@ def err(code, message, hint=None, data=None, http_status=None):
     if data: env["data"] = data
     return env
 
-TIMEOUT = ("request timed out: Get \"http://172.16.1.53:32500/player/playback/%s\": "
+TIMEOUT = ("request timed out: Get \"http://192.0.2.53:32500/player/playback/%s\": "
            "context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
 
 w("t05_bind_staged.json", err("PLEX_QUEUE_STAGED",
@@ -60,7 +60,7 @@ w("t06_queue_ok.json", {"ok": True, "playQueueID": "9203", "selectedItemID": "93
 for name in os.listdir(SHIMS):
     p = f"{SHIMS}/{name}"
     s = open(p).read()
-    s = s.replace("REAL=/Users/rlarsen/.local/bin/plexctl.real", f"REAL={V2}")
+    s = s.replace("REAL=$HOME/.local/bin/plexctl.real", f"REAL={V2}")
     s = s.replace(f"LOG=$B/logs/{name}.calls.log", f"LOG=$B/logs-b/{name}.calls.log")
     s = s.replace("emit t05_bind_staged.json 2", "emit t05_bind_staged.json 2")  # exit 2 unchanged
     s = s.replace("emit t06_bind_deadzone.json 2", "emit t06_bind_deadzone.json 2")
