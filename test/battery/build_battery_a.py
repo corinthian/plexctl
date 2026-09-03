@@ -10,7 +10,7 @@ v1 (1.1.0-dev) envelope shapes captured in shapes/.
 """
 import json, os, stat, textwrap
 
-B = "/Users/rlarsen/.claude/jobs/08fe1310/tmp/battery"
+B = os.environ.get("BATTERY_DIR", "battery")
 PAY = f"{B}/payloads"; SHIMS = f"{B}/shims"; LOGS = f"{B}/logs"; STATE = f"{B}/state"
 for d in (PAY, SHIMS, LOGS, STATE, f"{STATE}/emptycfg"):
     os.makedirs(d, exist_ok=True)
@@ -31,7 +31,7 @@ def searchrow(rk, title, typ, year, dur, summary, loose=None):
         r["loose"] = loose
     return r
 
-TIMEOUT_CLIENT = ("request timed out: Get \"http://172.16.1.53:32500/player/playback/%s\": "
+TIMEOUT_CLIENT = ("request timed out: Get \"http://192.0.2.53:32500/player/playback/%s\": "
                   "context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
 
 # ---- generic ----
@@ -192,7 +192,7 @@ HEADER = textwrap.dedent("""\
     #!/bin/bash
     # battery A-run shim {task} (generated)
     B={B}
-    REAL=/Users/rlarsen/.local/bin/plexctl.real
+    REAL=$HOME/.local/bin/plexctl.real
     LOG=$B/logs/{task}.calls.log
     PAY=$B/payloads
     ST=$B/state
