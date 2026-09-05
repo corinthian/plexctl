@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -167,5 +168,67 @@ func TestRequireMissingExitsFive(t *testing.T) {
 	}
 	if !strings.Contains(out, `"hint":"run: plexctl auth login"`) {
 		t.Fatalf("hint drifted: %q", out)
+	}
+}
+
+// TestSaveNewlineValueRoundTrips inverts the reproduction for the
+// hand-rolled writer: it escaped backslashes and double quotes only, so any
+// other TOML-significant byte in a value produced a file the CLI could no
+// longer parse. A newline is the reachable case — a client named
+// "Living\nRoom" wrote a broken config.toml and bricked every later command
+// with PLEX_AUTH_REQUIRED.
+func TestSaveNewlineValueRoundTrips(t *testing.T) {
+	t.Setenv("PLEXCTL_CONFIG_DIR", t.TempDir())
+	if err := config.Save([]config.KV{{K: "default_client", V: "Living\nRoom"}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.TryLoad()
+	if err != nil {
+		t.Fatalf("saved config no longer parses: %v", err)
+	}
+	if cfg["default_client"] != "Living\nRoom" {
+		t.Fatalf("default_client = %#v, want the newline value back intact", cfg["default_client"])
+	}
+}
+
+// TestSaveLoadRoundTripTypes pins that Save preserves TOML types instead of
+// stringifying everything. Compare against post-round-trip types: TOML
+// integers come back as int64 and floats as float64, so the expectations
+// below are the decoded forms, not the literals passed in.
+func TestSaveLoadRoundTripTypes(t *testing.T) {
+	t.Setenv("PLEXCTL_CONFIG_DIR", t.TempDir())
+	pairs := []config.KV{
+		{K: "token", V: "we\"ird\\token\nwith a newline"},
+		{K: "quoted.dotted key", V: "kept whole"},
+		{K: "timeout", V: 10},
+		{K: "ratio", V: 1.5},
+		{K: "verbose", V: true},
+		{K: "langs", V: []string{"eng", "jpn"}},
+		{K: "section", V: map[string]any{"nested": "value", "n": 2}},
+	}
+	if err := config.Save(pairs); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.TryLoad()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]any{
+		"token":             "we\"ird\\token\nwith a newline",
+		"quoted.dotted key": "kept whole",
+		"timeout":           int64(10),
+		"ratio":             1.5,
+		"verbose":           true,
+		"langs":             []any{"eng", "jpn"},
+		"section":           map[string]any{"nested": "value", "n": int64(2)},
+	}
+	for k, w := range want {
+		if got := cfg[k]; !reflect.DeepEqual(got, w) {
+			t.Fatalf("%s = %#v (%T), want %#v (%T)", k, got, got, w, w)
+		}
+	}
+	if len(cfg) != len(want) {
+		t.Fatalf("round-tripped %d keys, want %d: %#v", len(cfg), len(want), cfg)
 	}
 }

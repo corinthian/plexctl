@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 
@@ -106,17 +105,29 @@ func Require(key string) string {
 	return jsonx.AsStr(v)
 }
 
-// KV preserves write order — Python dicts keep insertion order, so the saved
-// file's key order is part of the observable format.
+// KV is one config key and its value. V is `any` so a value keeps the TOML
+// type it was loaded with: a numeric `timeout = 10` that round-trips through
+// login stays an integer instead of being restringed.
 type KV struct {
-	K, V string
+	K string
+	V any
 }
 
-// Save writes key = "value" lines with the same escaping as config.save
-// (backslashes and double quotes), via temp+rename like every other writer
-// in this codebase (queuestate.writeAll, the commandID counter) — config.toml
-// is read unlocked by every command, so a direct in-place write left a
-// window where a concurrent Load could see a truncated or partial file.
+// Save encodes the pairs with the TOML marshaller rather than formatting
+// `key = "value"` lines by hand. The hand-rolled writer escaped backslashes
+// and double quotes only, so any other TOML-significant byte in a value —
+// a newline in a client name being the reachable case — produced a file the
+// CLI could no longer parse, bricking every later command until the user
+// hand-repaired it.
+//
+// Key order is now the encoder's, not the caller's. Nothing but plexctl
+// reads config.toml, so order is cosmetic; the encoder writes scalars ahead
+// of sub-tables, which is what TOML validity requires anyway.
+//
+// The write is temp+rename like every other writer in this codebase
+// (queuestate.writeAll, the commandID counter) — config.toml is read
+// unlocked by every command, so a direct in-place write left a window where
+// a concurrent Load could see a truncated or partial file.
 func Save(pairs []KV) error {
 	if err := os.MkdirAll(Dir(), 0o700); err != nil {
 		return err
@@ -125,14 +136,16 @@ func Save(pairs []KV) error {
 	// the only token-writing path — this is the one place that needs to
 	// cover the upgrade case from an older, world-readable config dir.
 	_ = os.Chmod(Dir(), 0o700)
-	var b strings.Builder
+	doc := make(map[string]any, len(pairs))
 	for _, p := range pairs {
-		esc := strings.ReplaceAll(p.V, `\`, `\\`)
-		esc = strings.ReplaceAll(esc, `"`, `\"`)
-		b.WriteString(p.K + ` = "` + esc + `"` + "\n")
+		doc[p.K] = p.V
+	}
+	encoded, err := toml.Marshal(doc)
+	if err != nil {
+		return err
 	}
 	tmp := Path() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(tmp, encoded, 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, Path()); err != nil {

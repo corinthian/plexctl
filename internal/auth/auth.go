@@ -55,11 +55,9 @@ func loadOrQuarantineConfig() (jsonx.J, string, *output.CLIError) {
 // already in existing (a corrupt or missing config's TryLoad result — see
 // its own doc comment on why login must tolerate rather than abort on
 // that). Every other key existing already had — the README-documented
-// `timeout` included — survives untouched. TOML round-trips every value as
-// a quoted string (config.Save always double-quotes), so a numeric
-// `timeout = 10` survives as `timeout = "10"`; DefaultTimeout already
-// parses strings, so this is tolerated rather than fixed here — preserving
-// TOML types would mean widening KV beyond string, out of scope for this.
+// `timeout` included — survives untouched, and with its TOML type intact:
+// config.Save now encodes values rather than quoting them, so a numeric
+// `timeout = 10` stays an integer instead of coming back as "10".
 func mergeConfigPairs(existing jsonx.J, serverURL, token, defaultClient, clientID string) []config.KV {
 	managed := map[string]bool{"server_url": true, "token": true, "default_client": true, "client_id": true}
 	extraKeys := make([]string, 0, len(existing))
@@ -71,7 +69,7 @@ func mergeConfigPairs(existing jsonx.J, serverURL, token, defaultClient, clientI
 	sort.Strings(extraKeys) // existing is a map: iteration order isn't stable without this
 	pairs := make([]config.KV, 0, len(extraKeys)+4)
 	for _, k := range extraKeys {
-		pairs = append(pairs, config.KV{K: k, V: jsonx.AsStr(existing[k])})
+		pairs = append(pairs, config.KV{K: k, V: existing[k]})
 	}
 	return append(pairs,
 		config.KV{K: "server_url", V: serverURL},

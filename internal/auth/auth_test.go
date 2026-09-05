@@ -12,13 +12,16 @@ import (
 
 // TestMergeConfigPairsPreservesHandAddedKey pins W5: auth login used to
 // Save only its own four keys, silently destroying any other key the
-// config already had — the README-documented `timeout` included.
+// config already had — the README-documented `timeout` included. The
+// preserved value also keeps its TOML type now that config.Save encodes
+// rather than quotes: `timeout = 10` stays an integer instead of being
+// rewritten as "10".
 func TestMergeConfigPairsPreservesHandAddedKey(t *testing.T) {
 	existing := jsonx.J{"timeout": int64(10)}
 	pairs := mergeConfigPairs(existing, "http://pms:32400", "tok", "Apple TV", "cid-1")
 
 	want := []config.KV{
-		{K: "timeout", V: "10"},
+		{K: "timeout", V: int64(10)},
 		{K: "server_url", V: "http://pms:32400"},
 		{K: "token", V: "tok"},
 		{K: "default_client", V: "Apple TV"},
