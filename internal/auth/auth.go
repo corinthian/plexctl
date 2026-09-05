@@ -27,6 +27,30 @@ import (
 
 const plexTVSignIn = "https://plex.tv/users/sign_in.json"
 
+// loadOrQuarantineConfig is login's one config read, extracted as a seam:
+// Login itself reads stdin and posts to a const plex.tv URL, so it can't be
+// tested end-to-end, but this can.
+//
+// A usable config comes back as-is with no backup. An unusable one — bad
+// TOML, or a non-ENOENT read failure — cannot have its unmanaged keys
+// carried through the rename-over save, so the loss is made explicit rather
+// than silent: the original bytes move to config.toml.corrupt-<RFC3339>,
+// the caller warns naming that path, and login continues with an empty map,
+// writing only the four managed keys. If the file cannot be moved aside,
+// that is INTERNAL (exit 4) — never destroy what could not be backed up.
+func loadOrQuarantineConfig() (jsonx.J, string, *output.CLIError) {
+	existing, loadErr := config.TryLoad()
+	if loadErr == nil {
+		return existing, "", nil
+	}
+	backup := config.Path() + ".corrupt-" + time.Now().UTC().Format(time.RFC3339)
+	if err := os.Rename(config.Path(), backup); err != nil {
+		return nil, "", output.Err(output.CodeInternal,
+			fmt.Sprintf("config at %s is unusable (%v) and could not be moved aside: %v", config.Path(), loadErr, err))
+	}
+	return jsonx.J{}, backup, nil
+}
+
 // mergeConfigPairs overlays the four auth-managed keys onto whatever's
 // already in existing (a corrupt or missing config's TryLoad result — see
 // its own doc comment on why login must tolerate rather than abort on
@@ -99,6 +123,20 @@ func readPassword(reader *bufio.Reader) string {
 
 // Login mirrors auth.login (interactive; prints JSON result or error+exit).
 func Login() {
+	// The one config read, up front. It used to be a config.Load() midway
+	// through the prompts (below the password), so a corrupt config made
+	// login collect a password and then abort on the very file it exists to
+	// repair. Reading here also means the merge site downstream reuses this
+	// map instead of re-reading the file.
+	existing, configBackup, cliErr := loadOrQuarantineConfig()
+	if cliErr != nil {
+		output.FailErr(cliErr)
+		return
+	}
+	if configBackup != "" {
+		fmt.Fprintf(os.Stderr, "Warning: config at %s was unusable and has been moved to %s — only the auth-managed keys will be written; recover anything else from the backup.\n", config.Path(), configBackup)
+	}
+
 	fmt.Println("Plex.tv credentials (never stored — only the token is saved)")
 
 	reader := bufio.NewReader(os.Stdin)
@@ -133,7 +171,7 @@ func Login() {
 	}
 
 	var clientID string
-	if v, ok := config.Load()["client_id"]; ok && jsonx.Truthy(v) {
+	if v, ok := existing["client_id"]; ok && jsonx.Truthy(v) {
 		clientID = jsonx.AsStr(v)
 	} else {
 		clientID = "plexctl-" + randomClientIDSuffix()
@@ -242,8 +280,10 @@ func Login() {
 	// four keys to config.py's write_text-of-only-that-dict) rather than a
 	// port regression — but it silently destroyed any other hand-added key
 	// (the README-documented `timeout` included). mergeConfigPairs merges
-	// onto whatever's already there instead of overwriting it.
-	existing, _ := config.TryLoad()
+	// onto whatever's already there instead of overwriting it — `existing`
+	// being the map loadOrQuarantineConfig read at the top of Login (empty
+	// when the old file was quarantined, in which case there is nothing left
+	// to preserve).
 	pairs := mergeConfigPairs(existing, serverURL, token, defaultClient, clientID)
 
 	// Python's cfg.save() propagates filesystem errors (traceback, exit 1);
@@ -254,5 +294,11 @@ func Login() {
 		return
 	}
 
-	output.Print(jsonx.J{"ok": true, "message": fmt.Sprintf("token saved to %s", config.Path())})
+	result := jsonx.J{"ok": true, "message": fmt.Sprintf("token saved to %s", config.Path())}
+	// Additive, and present only when a config was actually moved aside, so
+	// a caller that never hits the corrupt path sees the v1 envelope.
+	if configBackup != "" {
+		result["configBackup"] = configBackup
+	}
+	output.Print(result)
 }

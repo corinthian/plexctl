@@ -21,6 +21,7 @@ Writes `~/.config/plexctl/config.toml` (mode 0600) with the server URL, auth tok
 
 - `$PLEXCTL_CONFIG_DIR` redirects the whole config directory — both `config.toml` and `queue_state.json`.
 - Timeout resolution: `--timeout` > `$PLEXCTL_TIMEOUT` > config `timeout` > 10s.
+- Login preserves any other key already in `config.toml`. If the existing file is unusable (malformed TOML, or unreadable), login moves it aside to `config.toml.corrupt-<timestamp>`, warns on stderr, writes only the four managed keys, and reports the backup path as `configBackup` on the success envelope.
 
 ## Security
 

@@ -5,6 +5,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,10 +60,19 @@ func Load() jsonx.J {
 // nil map, non-nil error, instead of aborting — auth login's config-merge
 // step needs to tolerate and repair a corrupt file, which Load's abort
 // would defeat (running login to fix a bad config would itself abort).
+//
+// Only os.ErrNotExist is "absent". Every other read error — a permissions
+// or I/O failure on a file that may be perfectly valid — is returned, not
+// flattened to an empty map: login merges onto TryLoad's result and saves
+// through a rename, so "unreadable" reported as "absent" silently destroys
+// every unmanaged key the file held.
 func TryLoad() (jsonx.J, error) {
 	b, err := os.ReadFile(Path())
 	if err != nil {
-		return jsonx.J{}, nil
+		if errors.Is(err, os.ErrNotExist) {
+			return jsonx.J{}, nil
+		}
+		return nil, err
 	}
 	var m map[string]any
 	if err := toml.Unmarshal(b, &m); err != nil {
