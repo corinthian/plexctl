@@ -39,18 +39,25 @@ func TestSaveLoadRoundTripWithEscaping(t *testing.T) {
 	}
 }
 
-// TestSaveWritesViaTempRenameNoLeftoverTmp pins W12: Save now writes through
-// a temp file and renames it into place, like every other writer in this
+// TestSaveWritesViaTempRenameNoLeftoverTmp pins W12: Save writes through a
+// temp file and renames it into place, like every other writer in this
 // codebase, instead of writing config.toml in place while every command
-// reads it unlocked.
+// reads it unlocked. The temp name is now generated rather than fixed, so
+// this globs the directory — statting config.toml.tmp would pass while
+// proving nothing, and the no-leftover guarantee is what makes the
+// os.Remove deferred on every non-rename exit load-bearing.
 func TestSaveWritesViaTempRenameNoLeftoverTmp(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
 	if err := config.Save([]config.KV{{K: "token", V: "tok"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(config.Path() + ".tmp"); !os.IsNotExist(err) {
-		t.Fatalf("leftover .tmp file after Save: err=%v", err)
+	leftovers, err := filepath.Glob(filepath.Join(config.Dir(), "config.toml.*tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("leftover temp files after Save: %v", leftovers)
 	}
 	if _, err := os.Stat(config.Path()); err != nil {
 		t.Fatalf("config.toml missing after Save: %v", err)
@@ -230,5 +237,40 @@ func TestSaveLoadRoundTripTypes(t *testing.T) {
 	}
 	if len(cfg) != len(want) {
 		t.Fatalf("round-tripped %d keys, want %d: %#v", len(cfg), len(want), cfg)
+	}
+}
+
+// TestSaveDoesNotFollowTmpSymlink inverts the second reproduction: Save
+// wrote to the fixed path config.toml.tmp, so a symlink pre-planted there
+// by anything else with write access to the config dir was followed and its
+// target overwritten with the file about to hold the Plex token.
+// os.CreateTemp creates a fresh, unpredictable name with O_EXCL instead.
+func TestSaveDoesNotFollowTmpSymlink(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+	sibling := filepath.Join(dir, "other")
+	if err := os.WriteFile(sibling, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sibling, config.Path()+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := config.Save([]config.KV{{K: "token", V: "tok"}}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "original" {
+		t.Fatalf("symlink target = %q, want %q — Save followed the planted .tmp symlink", b, "original")
+	}
+	cfg, err := config.TryLoad()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg["token"] != "tok" {
+		t.Fatalf("token = %#v, want the saved value", cfg["token"])
 	}
 }
