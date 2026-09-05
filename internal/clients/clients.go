@@ -72,33 +72,48 @@ func normName(v any) (string, bool) {
 	return strings.ToLower(s), true
 }
 
-// mergeClients mirrors clients.list_clients' merge step, joining registered
-// devices onto active Companion clients by lowercased name. A second active
-// client sharing a name marks that name ambiguous; the by-name map still
-// holds the first active client, so ambiguous rows carry its
-// machineIdentifier.
+// baseURL builds the Companion base URL for an active client. net.JoinHostPort
+// brackets an IPv6 host, whose own colons would otherwise collide with the
+// port separator.
+func baseURL(ac jsonx.J) string {
+	return "http://" + net.JoinHostPort(jsonx.AsStr(ac["host"]), jsonx.AsStr(ac["port"]))
+}
+
+// mergeClients joins plex.tv's registered devices onto the Companion clients
+// PMS currently reports, by lowercased name.
+//
+// The output is keyed on active identity, not on the registered list. Two
+// devices sharing a name used to collapse onto the first one's
+// machineIdentifier — every row carried it, so the second device was
+// unaddressable and PLEX_CLIENT_AMBIGUOUS listed the one identifier it had
+// kept while telling the caller to target by identifier. A same-named pair
+// now yields one row per active device, each with its own identifier and
+// baseurl, all flagged ambiguous.
+//
+// One row per *active* device, deliberately not one per registered row:
+// without a stable identifier on the plex.tv side there is no way to pair N
+// registered rows to N same-named actives, so the registered rows beyond the
+// first are folded into that enumeration rather than duplicating it. The
+// registered row supplies the descriptive fields (name/product/version/
+// lastSeen) because there is nothing better to attribute them from.
+//
+// An active device plex.tv has no row for gets a synthetic row instead of
+// vanishing: it is reachable right now, so it has to be listable.
 func mergeClients(active []jsonx.J, registered []jsonx.J) []jsonx.J {
-	activeByName := map[string]jsonx.J{}
-	duplicateNames := map[string]bool{}
+	activesByName := map[string][]jsonx.J{}
+	var activeNames []string // first-sight order; map iteration isn't stable
 	for _, c := range active {
 		k, ok := normName(c["name"])
 		if !ok {
 			continue
 		}
-		if _, exists := activeByName[k]; exists {
-			duplicateNames[k] = true
-			continue
+		if _, seen := activesByName[k]; !seen {
+			activeNames = append(activeNames, k)
 		}
-		activeByName[k] = c
+		activesByName[k] = append(activesByName[k], c)
 	}
 
-	out := make([]jsonx.J, 0, len(registered))
-	for _, d := range registered {
-		k, ok := normName(d["name"])
-		var ac jsonx.J
-		if ok {
-			ac = activeByName[k]
-		}
+	joined := func(d jsonx.J, ac jsonx.J, ambiguous bool) jsonx.J {
 		row := jsonx.J{
 			"name":              d["name"],
 			"product":           d["product"],
@@ -107,16 +122,60 @@ func mergeClients(active []jsonx.J, registered []jsonx.J) []jsonx.J {
 			"active":            ac != nil,
 			"machineIdentifier": nil,
 			"baseurl":           nil,
-			"ambiguous":         false,
+			"ambiguous":         ambiguous,
 		}
 		if ac != nil {
 			row["machineIdentifier"] = ac["machineIdentifier"]
-			row["baseurl"] = "http://" + net.JoinHostPort(jsonx.AsStr(ac["host"]), jsonx.AsStr(ac["port"]))
+			row["baseurl"] = baseURL(ac)
 		}
+		return row
+	}
+
+	out := make([]jsonx.J, 0, len(registered))
+	matched := map[string]bool{}    // names covered by some registered row
+	enumerated := map[string]bool{} // ambiguous names already expanded
+	for _, d := range registered {
+		var acs []jsonx.J
+		k, ok := normName(d["name"])
 		if ok {
-			row["ambiguous"] = duplicateNames[k]
+			acs = activesByName[k]
+			if len(acs) > 0 {
+				matched[k] = true
+			}
 		}
-		out = append(out, row)
+		switch {
+		case len(acs) == 0:
+			out = append(out, joined(d, nil, false))
+		case len(acs) == 1:
+			out = append(out, joined(d, acs[0], false))
+		default:
+			if enumerated[k] {
+				continue
+			}
+			enumerated[k] = true
+			for _, ac := range acs {
+				out = append(out, joined(d, ac, true))
+			}
+		}
+	}
+
+	for _, k := range activeNames {
+		if matched[k] {
+			continue
+		}
+		acs := activesByName[k]
+		for _, ac := range acs {
+			out = append(out, jsonx.J{
+				"name":              ac["name"],
+				"product":           ac["product"],
+				"version":           ac["version"],
+				"lastSeen":          nil, // plex.tv has no row to date it
+				"active":            true,
+				"machineIdentifier": ac["machineIdentifier"],
+				"baseurl":           baseURL(ac),
+				"ambiguous":         len(acs) > 1,
+			})
+		}
 	}
 	return out
 }
@@ -126,7 +185,11 @@ func ListClients() []jsonx.J {
 	return mergeClients(activeClients(), registeredDevices())
 }
 
-// PrintClients mirrors clients.print_clients.
+// PrintClients mirrors clients.print_clients. The note's denominator is the
+// merged row count, which since the identifier-retaining merge includes
+// active devices plex.tv has no row for and one row per device behind an
+// ambiguous name — so both halves of the ratio can differ from what a
+// pre-fix binary printed for the same network.
 func PrintClients() {
 	clientList := ListClients()
 	active := 0
@@ -142,9 +205,22 @@ func PrintClients() {
 	})
 }
 
-func bailAmbiguous(c jsonx.J) jsonx.J {
+// bailAmbiguous reports every device sharing the ambiguous name, not just
+// the row resolution happened to land on: the hint tells the caller to
+// target by machineIdentifier, so the envelope has to carry all of them.
+func bailAmbiguous(clientList []jsonx.J, c jsonx.J) jsonx.J {
 	msg := fmt.Sprintf("ambiguous client name '%s' — multiple active devices share this name; specify by machineIdentifier", jsonx.AsStr(c["name"]))
-	matches := []jsonx.J{{"name": c["name"], "machineIdentifier": c["machineIdentifier"]}}
+	wanted, _ := normName(c["name"])
+	matches := []jsonx.J{}
+	for _, row := range clientList {
+		if k, ok := normName(row["name"]); !ok || k != wanted {
+			continue
+		}
+		if ambiguous, _ := row["ambiguous"].(bool); !ambiguous {
+			continue
+		}
+		matches = append(matches, jsonx.J{"name": row["name"], "machineIdentifier": row["machineIdentifier"]})
+	}
 	output.FailErr(output.Err(output.CodeClientAmbiguous, msg).
 		WithHint("target by machineIdentifier — run: plexctl clients").
 		WithData("matches", matches))
@@ -161,7 +237,7 @@ func resolveIn(clientList []jsonx.J, target string) jsonx.J {
 		if (nameIsStr && nameStr == target) || (midIsStr && midStr == target) {
 			ambiguous, _ := c["ambiguous"].(bool)
 			if ambiguous && !(midIsStr && midStr == target) {
-				return bailAmbiguous(c)
+				return bailAmbiguous(clientList, c)
 			}
 			active, _ := c["active"].(bool)
 			if !active {
@@ -182,7 +258,7 @@ func resolveIn(clientList []jsonx.J, target string) jsonx.J {
 		}
 		ambiguous, _ := c["ambiguous"].(bool)
 		if ambiguous {
-			return bailAmbiguous(c)
+			return bailAmbiguous(clientList, c)
 		}
 		active, _ := c["active"].(bool)
 		if !active {
