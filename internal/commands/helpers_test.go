@@ -93,6 +93,22 @@ func (f *fakePMS) countMethod(method string) int {
 	return n
 }
 
+// countPath reports how many requests hit a path, whatever the method. Used
+// by negative tests that have to prove a call never happened — asserting on
+// the command's own exit code can't distinguish "never asked" from "asked
+// and the answer happened to work".
+func (f *fakePMS) countPath(path string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		if c.path == path {
+			n++
+		}
+	}
+	return n
+}
+
 // hostRedirectTransport rewrites requests to a fixed host so they land on a
 // local test server instead of the real internet.
 type hostRedirectTransport struct {
