@@ -498,3 +498,54 @@ func TestBulkSetAudioPartialFailureIsHTTPErrorWithResults(t *testing.T) {
 		t.Fatalf("results statuses = %#v, want 1 ok + 1 error", statuses)
 	}
 }
+
+// TestSetAudioSingleDryRunRejectedNoWrite pins the item-1 fix: the four
+// bulk-only flags (--dry-run, --season, --all-seasons, --only-non-eng) are
+// rejected in single-item mode BEFORE any HTTP, mirroring the bulk branch's
+// existing "--stream-id is single-item only" rejection. --dry-run in
+// particular used to be accepted and ignored, so `set-audio 123 --dry-run`
+// performed the PUT it claimed to be planning. Asserting only the error code
+// would pass a build that writes first and errors afterwards, so the PUT
+// count is the load-bearing assertion.
+func TestSetAudioSingleDryRunRejectedNoWrite(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"dry-run", []string{"set-audio", "123", "--dry-run"}, "--dry-run is bulk-only; not valid with RATING_KEY"},
+		{"season", []string{"set-audio", "123", "--season", "2"}, "--season is bulk-only; not valid with RATING_KEY"},
+		{"all-seasons", []string{"set-audio", "123", "--all-seasons"}, "--all-seasons is bulk-only; not valid with RATING_KEY"},
+		{"only-non-eng", []string{"set-audio", "123", "--only-non-eng"}, "--only-non-eng is bulk-only; not valid with RATING_KEY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakePMS(t)
+			f.onJSON("GET", "/library/metadata/123", map[string]any{
+				"MediaContainer": map[string]any{"Metadata": []any{map[string]any{
+					"ratingKey": "123",
+					"Media": []any{map[string]any{"Part": []any{map[string]any{
+						"id":     456,
+						"Stream": []any{map[string]any{"id": 789, "streamType": 2, "languageCode": "eng"}},
+					}}}},
+				}}},
+			})
+			f.onJSON("PUT", "/library/parts/456", map[string]any{})
+
+			root := commands.BuildRoot()
+			root.SetArgs(tc.args)
+			out, code := testutil.Capture(t, func() { _ = root.Execute() })
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1; out=%s", code, out)
+			}
+			if n := f.countMethod("PUT"); n != 0 {
+				t.Fatalf("PUT count = %d, want 0 (validation must precede the write)", n)
+			}
+			got := mustUnmarshal(t, out)
+			body := errBody(t, got)
+			if got["ok"] != false || body["code"] != "BAD_REQUEST" || body["message"] != tc.want {
+				t.Fatalf("got %#v, want BAD_REQUEST %q", got, tc.want)
+			}
+		})
+	}
+}

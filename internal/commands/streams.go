@@ -156,6 +156,19 @@ Single: --language (default eng) xor --stream-id. Bulk: --language, optional
 			}
 
 			// single-item
+			//
+			// The four bulk-only flags are rejected here rather than silently
+			// ignored: --dry-run used to be accepted and dropped, so a
+			// single-item "plan" performed the write it claimed to be
+			// planning. Rejection mirrors the bulk branch's --stream-id guard
+			// above and keeps the dry-run gate meaning one thing. This must
+			// precede SetAudioStream — any HTTP at all.
+			for _, bulkOnly := range []string{"dry-run", "season", "all-seasons", "only-non-eng"} {
+				if cmd.Flags().Changed(bulkOnly) {
+					output.FailErr(output.Err(output.CodeBadRequest, "--"+bulkOnly+" is bulk-only; not valid with RATING_KEY"))
+					return nil
+				}
+			}
 			if languageSet && streamIDSet {
 				output.FailErr(output.Err(output.CodeBadRequest, "--language and --stream-id are mutually exclusive"))
 				return nil
