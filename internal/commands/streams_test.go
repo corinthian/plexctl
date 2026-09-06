@@ -499,6 +499,70 @@ func TestBulkSetAudioPartialFailureIsHTTPErrorWithResults(t *testing.T) {
 	}
 }
 
+// TestBulkSetAudioDryRunSucceedsWithZeroWrites is the E20 gap: every existing
+// dry-run test either rejects the flag outright (single-item mode) or never
+// registers a PUT handler, so a bulk dry-run that plans real work and then
+// mistakenly executed it would still show ok:true with no server to catch
+// the write. Here both parts' PUT handlers are live — if bulkSetAudio's
+// dryRun branch ever fell through to streams.ExecuteBulkAudio, countMethod
+// would see it. plexctl has no filesystem or queue-state surface behind
+// set-audio (bulkSetAudio touches only the PMS client), so the filesystem
+// half of "dry-run counts both network and state writes" is n/a here; the
+// network half is the load-bearing assertion.
+func TestBulkSetAudioDryRunSucceedsWithZeroWrites(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("GET", "/hubs/search", showHubResponse("1", "Show"))
+	f.onJSON("GET", "/library/metadata/1/allLeaves", map[string]any{
+		"MediaContainer": map[string]any{
+			"Metadata": []any{
+				map[string]any{"ratingKey": "10", "parentIndex": 1.0, "index": 1.0, "title": "S1E1"},
+				map[string]any{"ratingKey": "11", "parentIndex": 1.0, "index": 2.0, "title": "S1E2"},
+			},
+		},
+	})
+	f.onJSON("GET", "/library/metadata/10,11", map[string]any{
+		"MediaContainer": map[string]any{
+			"Metadata": []any{
+				map[string]any{"ratingKey": "10", "Media": []any{
+					map[string]any{"Part": []any{
+						map[string]any{"id": 500.0, "Stream": []any{
+							map[string]any{"id": 2.0, "streamType": 2.0, "languageCode": "eng", "language": "English"},
+						}},
+					}},
+				}},
+				map[string]any{"ratingKey": "11", "Media": []any{
+					map[string]any{"Part": []any{
+						map[string]any{"id": 501.0, "Stream": []any{
+							map[string]any{"id": 3.0, "streamType": 2.0, "languageCode": "eng", "language": "English"},
+						}},
+					}},
+				}},
+			},
+		},
+	})
+	// Both PUTs would succeed if reached — a silent no-op here would let a
+	// regression pass, which is why they must be live rather than absent.
+	f.onStatus("PUT", "/library/parts/500", 200)
+	f.onStatus("PUT", "/library/parts/501", 200)
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"set-audio", "--show", "Show", "--language", "eng", "--dry-run"})
+	out, _ := testutil.Capture(t, func() { _ = root.Execute() })
+	if n := f.countMethod("PUT"); n != 0 {
+		t.Fatalf("PUT count = %d, want 0 (dry-run must never reach ExecuteBulkAudio)", n)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != true {
+		t.Fatalf("got %#v, want ok:true", got)
+	}
+	if got["dryRun"] != true {
+		t.Fatalf("dryRun = %#v, want true", got["dryRun"])
+	}
+	if toApply, _ := got["toApply"].(float64); toApply != 2 {
+		t.Fatalf("toApply = %#v, want 2", got["toApply"])
+	}
+}
+
 // TestSetAudioSingleDryRunRejectedNoWrite pins the item-1 fix: the four
 // bulk-only flags (--dry-run, --season, --all-seasons, --only-non-eng) are
 // rejected in single-item mode BEFORE any HTTP, mirroring the bulk branch's
