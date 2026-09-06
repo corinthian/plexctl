@@ -11,11 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/corinthian/plexctl/internal/app"
@@ -23,7 +20,6 @@ import (
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
-	"github.com/corinthian/plexctl/internal/xduration"
 	"github.com/corinthian/plexctl/internal/xhttp"
 )
 
@@ -35,170 +31,38 @@ var Version = "2.0.0-dev"
 
 const plexTV = "https://plex.tv"
 
-// DefaultTimeout is the timeout used when no source supplies one.
-const DefaultTimeout = 10 * time.Second
+// DefaultTimeout is the timeout used when no source supplies one. The
+// resolution itself lives on the invocation's App (internal/app): it is
+// per-invocation state, lazily resolved and memoised there alongside the
+// config it may have to read. These are the thin forwarders the CLI, seek and
+// the grammar's tests call.
+const DefaultTimeout = app.DefaultTimeout
 
-// resolvedTimeout is the per-invocation timeout once a source that costs
-// nothing to read has supplied one — the flag, the environment, or the
-// config file after Timeout() has gone and looked. nil means no source has
-// been consulted yet. It is a resolved value with no parsing left in it: the
-// grammar is enforced at the boundary, in ResolveTimeout.
-var (
-	timeoutMu       sync.Mutex
-	resolvedTimeout *time.Duration
-)
+// SetTimeout stores the resolved timeout on this invocation's App.
+func SetTimeout(d time.Duration) { app.Current().SetTimeout(d) }
 
-// timeoutForTest, when set, wins over the resolved value. It has to: root's
-// PersistentPreRunE resolves on every invocation, so a test that forces a
-// sub-second timeout and then runs a command through the root would have it
-// overwritten before the first request.
-var timeoutForTest *time.Duration
-
-// SetTimeout stores the resolved timeout. root's PersistentPreRunE (and
-// seek's own in-RunE resolution, which DisableFlagParsing forces) are the
-// only production callers.
-func SetTimeout(d time.Duration) {
-	timeoutMu.Lock()
-	defer timeoutMu.Unlock()
-	resolvedTimeout = &d
-}
-
-// ResetTimeout discards the previous invocation's resolution. root calls it
-// once per invocation, before resolving.
-func ResetTimeout() {
-	timeoutMu.Lock()
-	defer timeoutMu.Unlock()
-	resolvedTimeout = nil
-}
-
-// Timeout returns the resolved per-invocation timeout, consulting the config
-// file only if it must — that is, only when neither the flag nor the
-// environment supplied one, and only at the first client construction. Help,
-// discovery and argument errors never get this far, which is what keeps them
-// off the file (contract 2.7).
-//
-// The config candidate is the one source that can fail here rather than in
-// PersistentPreRunE, so the rejection is emitted directly: BAD_REQUEST at
-// exit 1, the same code and exit every other rejected timeout gets.
-func Timeout() time.Duration {
-	if timeoutForTest != nil {
-		return *timeoutForTest
-	}
-	timeoutMu.Lock()
-	defer timeoutMu.Unlock()
-	if resolvedTimeout != nil {
-		return *resolvedTimeout
-	}
-	d, err := xduration.Resolve(DefaultTimeout, configTimeoutCandidate())
-	if err != nil {
-		output.FailErr(output.Err(output.CodeBadRequest, err.Error()))
-		return DefaultTimeout // reached only when output.Exit is a test seam
-	}
-	resolvedTimeout = &d
-	return d
-}
+// Timeout returns this invocation's timeout, resolving it at most once.
+func Timeout() time.Duration { return app.Current().Timeout() }
 
 // SetTimeoutForTest forces a timeout directly, bypassing the parser. It is
 // test-only and the CLI never calls it: the user-facing grammar is whole
 // seconds from 1 to 86400, which cannot express the sub-second values tests
-// need to make a request time out quickly.
-func SetTimeoutForTest(d time.Duration) { timeoutForTest = &d }
+// need to make a request time out quickly. The override is sticky — it
+// outlives root installing a fresh App on the next invocation.
+func SetTimeoutForTest(d time.Duration) { app.SetTimeoutForTest(d) }
 
-// ClearTimeoutForTest restores the default. Test-only, as above.
-func ClearTimeoutForTest() { timeoutForTest = nil }
+// ClearTimeoutForTest restores normal resolution. Test-only, as above.
+func ClearTimeoutForTest() { app.ClearTimeoutForTest() }
 
-// ResolveTimeoutEager resolves the two sources that cost nothing to read: the
-// flag and the environment. ok is false when neither is present, in which
-// case the config file decides and is not read here — root calls this from
-// PersistentPreRunE, which runs before every command including the ones that
-// must never touch the file.
+// ResolveTimeoutEager resolves the flag and the environment, the two sources
+// that cost nothing to read. ok is false when neither is present.
 func ResolveTimeoutEager(flagSet bool, flagValue string) (time.Duration, bool, error) {
-	if flagSet {
-		d, err := xduration.Parse(flagValue, "--timeout")
-		return d, err == nil, err
-	}
-	raw := os.Getenv("PLEXCTL_TIMEOUT")
-	if raw == "" {
-		return 0, false, nil
-	}
-	d, err := xduration.Parse(raw, "$PLEXCTL_TIMEOUT")
-	return d, err == nil, err
+	return app.ResolveTimeoutEager(flagSet, flagValue)
 }
 
-// configTimeoutCandidate is the config file's candidate, read fresh.
-func configTimeoutCandidate() xduration.Candidate {
-	return xduration.Candidate{
-		Source: "config timeout (" + config.Path() + ")",
-		Value:  configTimeoutRaw(),
-	}
-}
-
-// ResolveTimeout resolves the timeout from --timeout, $PLEXCTL_TIMEOUT and
-// the config file, in that order, under xduration's integer-seconds grammar.
-//
-// The flag does not go through xduration.Resolve. Resolve skips a candidate
-// whose value is empty, which is right for an environment variable and a
-// config key — absent means unset — and wrong for a flag: `--timeout ""` is
-// an explicitly supplied empty value, which is a mistake, not an unset
-// source (contract 2.1). So a flag that was Changed is parsed directly and
-// its result is the answer whatever it is.
-//
-// The config candidate is built only when the environment variable is unset.
-// Resolve would otherwise have its argument evaluated eagerly, reading the
-// config file even when $PLEXCTL_TIMEOUT wins — widening the load frequency
-// that contract 2.7 is narrowing.
+// ResolveTimeout resolves the whole ladder against the current App's config.
 func ResolveTimeout(flagSet bool, flagValue string) (time.Duration, error) {
-	if flagSet {
-		return xduration.Parse(flagValue, "--timeout")
-	}
-	candidates := []xduration.Candidate{{Source: "$PLEXCTL_TIMEOUT", Value: os.Getenv("PLEXCTL_TIMEOUT")}}
-	if candidates[0].Value == "" {
-		candidates = append(candidates, configTimeoutCandidate())
-	}
-	return xduration.Resolve(DefaultTimeout, candidates...)
-}
-
-// configTimeoutRaw renders the config file's `timeout` value back to text for
-// the parser. A TOML integer becomes its decimal digits and is accepted; a
-// float, string, bool, array or table renders to something the integer
-// grammar is guaranteed to reject, so one code path produces every rejection
-// message and every rejection names the value the user actually wrote.
-//
-// An absent key renders empty, which xduration.Resolve reads as unset.
-//
-// The read goes through the invocation's App, tolerantly: it shares the one
-// memoised load with every other config reader, so a command that resolves a
-// timeout and then makes three requests still touches the file once, and a
-// file that cannot be parsed is simply no candidate rather than a
-// PLEX_AUTH_REQUIRED abort that would kill auth login before its repair ran.
-func configTimeoutRaw() string {
-	cfg, err := app.Current().TryConfig()
-	if err != nil {
-		return ""
-	}
-	raw, ok := cfg["timeout"]
-	if !ok {
-		return ""
-	}
-	switch t := raw.(type) {
-	case int64:
-		return strconv.FormatInt(t, 10)
-	case float64:
-		// A TOML float is a distinct type and is never coerced, so 10.0 must
-		// be rejected exactly as 10.5 is. Keep the point visible.
-		text := strconv.FormatFloat(t, 'g', -1, 64)
-		if !strings.ContainsAny(text, ".eE") {
-			text += ".0"
-		}
-		return text
-	case string:
-		// Quoted, so `timeout = "10"` is rejected and the message shows the
-		// quotes that are the actual mistake. An empty string quotes to `""`,
-		// which is non-empty and so is rejected rather than read as unset.
-		return strconv.Quote(t)
-	default:
-		return fmt.Sprintf("%v", raw)
-	}
+	return app.ResolveTimeout(flagSet, flagValue)
 }
 
 // Error mirrors PlexAPIError. Message is JSON-safe; Kind is "timeout" for

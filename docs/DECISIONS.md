@@ -26,7 +26,11 @@ arrctl and traktctl route the environment and config sources to their config fam
 
 Config failures that genuinely are auth failures — a missing token, an unreadable file, unparseable TOML — keep `PLEX_AUTH_REQUIRED` at exit 5, unchanged.
 
-The resolved value is a process-scoped `time.Duration` in `internal/api`, set once by root's `PersistentPreRunE`. It is a resolved value with no parsing left in it; phase C3a-2 moves it onto a per-invocation `App`, and C3b is where an injected seam would go if one is ever wanted.
+The resolved value lives on the invocation's `App` in `internal/app`, alongside the config it may have to read; `api.Timeout` and `api.SetTimeout` are thin forwarders. It is a resolved value with no parsing left in it, and C3b is where an injected seam would go if one is ever wanted.
+
+The sources are split by what they cost to read. The flag and `$PLEXCTL_TIMEOUT` are resolved eagerly in root's `PersistentPreRunE`, so `plexctl --timeout 10.5 now-playing` is `BAD_REQUEST` 1 before a socket is opened. The config file is not read there — that read is exactly the load frequency contract 2.7 narrows — so a `timeout` key decides only when neither of the other two spoke, lazily, at the first client construction, and its rejection is emitted at that point with the same `BAD_REQUEST` 1. The one consequence: a command that never constructs a client, `plexctl commands` among them, no longer rejects a bad `timeout` in the config file. It also no longer opens it, which is the row the contract asks for.
+
+`SetTimeoutForTest` is package-scoped rather than a field on `App`, and `Reset` does not clear it. Root installs a fresh `App` on every invocation, so an override held on one `App` would be discarded the moment a test ran a command through the root; fourteen call sites force a sub-second timeout that way and clear it with `t.Cleanup(api.ClearTimeoutForTest)`. Clearing it from `Reset` — which `testutil.Setup` calls — would silently hand those tests the ten-second default instead.
 
 ## A failed write is never reported as success — 2026-09-06
 

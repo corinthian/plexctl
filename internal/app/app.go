@@ -13,6 +13,7 @@ package app
 
 import (
 	"sync"
+	"time"
 
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
@@ -26,6 +27,9 @@ type App struct {
 	loaded  bool
 	cfg     jsonx.J
 	loadErr error
+
+	timeoutSet bool
+	timeout    time.Duration
 }
 
 // New returns an App that has read nothing yet.

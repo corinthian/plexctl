@@ -51,8 +51,9 @@ in this tree.`,
 			// through it. Constructing it reads nothing: the config file is
 			// loaded at most once, on first use, so help, discovery and
 			// argument errors never touch it (contract 2.7).
+			// The App carries the timeout too, so installing a fresh one is
+			// also what discards the previous invocation's resolution.
 			app.Set(app.New())
-			api.ResetTimeout()
 			// The flag and the environment are resolved here, eagerly, so a
 			// rejected value is an error before any request. The config file
 			// is not: reading it here is the load frequency contract 2.7
