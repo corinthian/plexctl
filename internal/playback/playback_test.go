@@ -949,8 +949,37 @@ func TestPlayRefusesRedirect(t *testing.T) {
 	if !strings.HasPrefix(cliErr.Message, "connection failed:") {
 		t.Fatalf("want 'connection failed:' prefix, got %q", cliErr.Message)
 	}
-	if !strings.Contains(cliErr.Message, "redirect refused") {
-		t.Fatalf("want 'redirect refused' in message, got %q", cliErr.Message)
+	if !strings.Contains(cliErr.Message, "refused: redirects are not followed") {
+		t.Fatalf("want the refusal wording in message, got %q", cliErr.Message)
+	}
+}
+
+// TestRefusedRedirectKeepsTargetClassification pins contract 2.2's last
+// plexctl bullet: under RejectAll the refusal must keep the target's
+// classification, so a refused redirect from a client target stays
+// PLEX_CLIENT_UNREACHABLE at exit 3 rather than collapsing into a generic
+// transport code. This is today's behaviour and the migration to
+// xhttp.NewClient has to preserve it.
+func TestRefusedRedirectKeepsTargetClassification(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	_, cliErr := Play(fakeClient(srv.URL))
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeClientUnreachable || cliErr.ExitCode() != 3 {
+		t.Fatalf("code = %q exit %d, want PLEX_CLIENT_UNREACHABLE exit 3", cliErr.Code, cliErr.ExitCode())
+	}
+	if cliErr.Code == output.CodeDecodeError {
+		t.Fatal("a refused redirect must not classify as a decode error")
 	}
 }
 

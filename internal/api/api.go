@@ -212,16 +212,15 @@ func BuildURL(base, path string, params url.Values) string {
 // Cookie-class headers cross-origin). CheckRedirect fires BEFORE the
 // redirect request is sent, so refusing here means no header ever leaves.
 func NewHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
-	c := &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return fmt.Errorf("redirect refused: destination %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
-		},
-	}
-	if transport != nil {
-		c.Transport = transport
-	}
-	return c
+	// The wrapper keeps its name and signature and delegates. Every
+	// http.Client in plexctl still comes from one constructor, which is the
+	// property contract 2.2 protects, and the four call sites are unchanged.
+	// No hop cap is added: reject-all makes a redirect loop unreachable.
+	return xhttp.NewClient(xhttp.Options{
+		Timeout:   timeout,
+		Redirects: xhttp.RedirectPolicy{RejectAll: true},
+		Transport: transport,
+	})
 }
 
 // SanitizeError renders err without query strings, userinfo, or fragments.

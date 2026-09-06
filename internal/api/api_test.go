@@ -411,8 +411,12 @@ func TestRequestRefusesRedirect(t *testing.T) {
 	if !strings.HasPrefix(apiErr.Message, "connection failed:") {
 		t.Fatalf("want 'connection failed:' prefix, got %q", apiErr.Message)
 	}
-	if !strings.Contains(apiErr.Message, "redirect refused") {
-		t.Fatalf("want 'redirect refused' in message, got %q", apiErr.Message)
+	// xhttp's refusal reads "redirect to <scheme>://<host> refused:
+	// redirects are not followed" where the inline CheckRedirect read
+	// "redirect refused: destination <scheme>://<host><path>". Code and exit
+	// do not change; only the wording does.
+	if !strings.Contains(apiErr.Message, "refused: redirects are not followed") {
+		t.Fatalf("want the refusal wording in message, got %q", apiErr.Message)
 	}
 	if strings.Contains(apiErr.Message, "SECRETPHRASE") || strings.Contains(apiErr.Message, "?") {
 		t.Fatalf("query string leaked into error: %q", apiErr.Message)
