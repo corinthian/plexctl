@@ -67,11 +67,11 @@ noise.`,
 				if loose && len(results) > 0 {
 					out["loose"] = true
 				}
-				output.Print(searchMinScoreEnvWarning(out))
+				output.PrintOrFail(searchMinScoreEnvWarning(out))
 				return nil
 			}
 			if len(results) == 0 {
-				output.Print(searchMinScoreEnvWarning(jsonx.J{"ok": true, "results": []jsonx.J{}, "note": "no matches"}))
+				output.PrintOrFail(searchMinScoreEnvWarning(jsonx.J{"ok": true, "results": []jsonx.J{}, "note": "no matches"}))
 				return nil
 			}
 			summary := make([]jsonx.J, 0, len(results))
@@ -88,7 +88,7 @@ noise.`,
 				out["loose"] = true
 				out["note"] = "low-confidence match — no result cleared the confident threshold"
 			}
-			output.Print(searchMinScoreEnvWarning(out))
+			output.PrintOrFail(searchMinScoreEnvWarning(out))
 			return nil
 		},
 	}
@@ -298,7 +298,7 @@ only, --ndjson to stream line-delimited rows for batch callers.`,
 				return nil
 			}
 			if asJSON {
-				output.Print(showIdentity(jsonx.J{"ok": true, "count": len(rows), "results": rows}, hit))
+				output.PrintOrFail(showIdentity(jsonx.J{"ok": true, "count": len(rows), "results": rows}, hit))
 				return nil
 			}
 			result := showIdentity(jsonx.J{"ok": true, "count": len(rows), "episodes": rows}, hit)

@@ -347,5 +347,5 @@ func Login() {
 	if configBackup != "" {
 		result["configBackup"] = configBackup
 	}
-	output.Print(result)
+	output.PrintOrFail(result)
 }

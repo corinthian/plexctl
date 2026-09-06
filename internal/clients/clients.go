@@ -198,7 +198,7 @@ func PrintClients() {
 			active++
 		}
 	}
-	output.Print(jsonx.J{
+	output.PrintOrFail(jsonx.J{
 		"ok":      true,
 		"clients": clientList,
 		"note":    fmt.Sprintf("%d/%d clients currently controllable (app must be open)", active, len(clientList)),

@@ -56,3 +56,28 @@ func Capture(t *testing.T, fn func()) (out string, code int) {
 	fn()
 	return
 }
+
+// CaptureErr is Capture plus output.Stderr. It is a second function rather
+// than a change to Capture's signature because ten test files use Capture as
+// it stands; the stderr fallback line is untestable without it.
+func CaptureErr(t *testing.T, fn func()) (out, errOut string, code int) {
+	t.Helper()
+	var buf, ebuf bytes.Buffer
+	oldW, oldE, oldExit := output.Stdout, output.Stderr, output.Exit
+	output.Stdout, output.Stderr = &buf, &ebuf
+	output.Exit = func(c int) { panic(ExitPanic{c}) }
+	defer func() {
+		output.Stdout, output.Stderr, output.Exit = oldW, oldE, oldExit
+		out, errOut = buf.String(), ebuf.String()
+		if r := recover(); r != nil {
+			ep, ok := r.(ExitPanic)
+			if !ok {
+				panic(r)
+			}
+			code = ep.Code
+		}
+	}()
+	code = -1
+	fn()
+	return
+}

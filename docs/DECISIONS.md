@@ -27,3 +27,13 @@ arrctl and traktctl route the environment and config sources to their config fam
 Config failures that genuinely are auth failures — a missing token, an unreadable file, unparseable TOML — keep `PLEX_AUTH_REQUIRED` at exit 5, unchanged.
 
 The resolved value is a process-scoped `time.Duration` in `internal/api`, set once by root's `PersistentPreRunE`. It is a resolved value with no parsing left in it; phase C3a-2 moves it onto a per-invocation `App`, and C3b is where an injected seam would go if one is ever wanted.
+
+## A failed write is never reported as success — 2026-09-06
+
+`output.Print` discarded the `Fprintln` error, so a command whose output never reached stdout still exited 0 with `ok:true`. `Print` now returns the error and no caller ignores it.
+
+On the success path a failed write is `INTERNAL` at exit 4. On the NDJSON path the run stops at the failing row: rows already written stand, nothing further is written, and no summary line is emitted — a summary after a lost row would report a count that never left the process.
+
+On the error path the envelope is not retried. A single plain-text line goes to stderr — `plexctl: cannot write output: <io error> (original error: <CODE>)` — and the exit becomes 4 rather than the original code's class. The failure the caller now has is that plexctl could not report anything, which is an internal failure whatever the original was.
+
+`EPIPE` is deliberately not special-cased. The Go runtime re-raises `SIGPIPE` on a broken fd 1 and the process dies before the write returns, so `plexctl … | head` never reaches this path.

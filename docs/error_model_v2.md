@@ -85,7 +85,7 @@ Family rule for Subtrakt: the auth code contains `_AUTH_` so its cross-tool clas
 | `PLEX_UNSUPPORTED` | 2 | Operation the stack cannot perform: `queue-shuffle`/`queue-unshuffle` (PMS 1.43 404s them), `volume` (Apple TV Companion accepts and ignores) | — | — |
 | `PLEX_STATE_SAVE_FAILED` | n/a (warning only) | Local queue-state write failed after a successful operation — emitted in success `warnings`, never as a failure | `state file may be stale — a later queue-show can read empty` | — |
 | `NOT_APPLIED` | 6 | Upstream 2xx but verification shows nothing changed: bare `play` on an idle client (P3.1), queue-add whose post-add size verify shows no growth (replaces v1 "likely unknown or invalid"), any P1.3-verified mutation that no-ops | names the effective command, e.g. `client idle — start items with: plexctl play-media RATING_KEY` | command-specific |
-| `INTERNAL` | 4 | plexctl bug: impossible state, marshal failure, `could not retrieve server machineIdentifier` | `report this — plexctl bug` | — |
+| `INTERNAL` | 4 | plexctl bug: impossible state, marshal failure, `could not retrieve server machineIdentifier`, a failed write to stdout on the success or NDJSON path | `report this — plexctl bug` | — |
 
 31 codes incl. the warning-only one. The skill's v2 translation table maps code → phrase, ~1 row per code — down from 33 free-text rows + state-machine prose.
 

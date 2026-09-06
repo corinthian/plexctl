@@ -1,6 +1,8 @@
 package output
 
 import (
+	"fmt"
+
 	"github.com/corinthian/plexctl/internal/jsonx"
 )
 
@@ -161,8 +163,18 @@ func (e *CLIError) Envelope() jsonx.J {
 }
 
 // FailErr prints the v2 error envelope and exits per the code's class.
+//
+// If the envelope cannot be written, the envelope is not retried: a single
+// plain-text line goes to Stderr naming the io error and the original code,
+// and the exit becomes 4. The original error's class is lost deliberately —
+// the failure the caller now has is that plexctl could not report anything,
+// which is an internal failure whatever the original was (contract 2.6).
 func FailErr(e *CLIError) {
-	Print(e.Envelope())
+	if err := Print(e.Envelope()); err != nil {
+		fmt.Fprintf(Stderr, "plexctl: cannot write output: %v (original error: %s)\n", err, e.Code)
+		Exit(ExitInternal)
+		return
+	}
 	Exit(e.ExitCode())
 }
 
