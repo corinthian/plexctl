@@ -34,7 +34,7 @@ Goal: smooth find / watch / play UX. Hide plexctl noise. Never surface internal 
 
 ## The Error Contract
 
-Every failure is `{ok:false, error:{code, message, http_status?, hint?}, data?}` on stdout, exit codes: 1 bad invocation, 2 Plex refused, 3 transport, 4 plexctl bug, 5 not logged in, 6 accepted-but-nothing-happened.
+Every failure is `{ok:false, error:{code, message, http_status?, hint?}, data?}` on stdout, exit codes: 1 bad invocation, 2 Plex refused, 3 transport, 4 plexctl bug or a response it could not decode, 5 not logged in, 6 accepted-but-nothing-happened.
 
 Two rules:
 
@@ -67,6 +67,7 @@ Two rules:
 | PLEX_SMART_CONTAINER | That's a smart collection/playlist — edit its rule in the Plex app. |
 | PLEX_UNSUPPORTED | Not supported (shuffle/volume) — use the Plex app UI / TV remote. |
 | NOT_APPLIED (exit 6) | Plex accepted it but nothing actually changed — say so; follow the hint (e.g. idle `play` → `play-media` the queue's selected item's ratingKey from `queue-show`). |
+| DECODE_ERROR | Plex sent something that was not the JSON it promised, or a response over the size bound. Report it — do not retry. |
 | INTERNAL | plexctl bug — surface the message, suggest `debug`. |
 
 Success envelopes may carry `warnings` (e.g. PLEX_STATE_SAVE_FAILED). Mention a warning only if it affects what the user does next.

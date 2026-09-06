@@ -41,6 +41,7 @@ const (
 	CodeCloudUnreachable   = "CLOUD_UNREACHABLE"
 	CodeTransportTimeout   = "TRANSPORT_TIMEOUT"
 	CodeTransportFailed    = "TRANSPORT_FAILED"
+	CodeDecodeError        = "DECODE_ERROR"
 	CodeServerError        = "PLEX_SERVER_ERROR"
 	CodeHTTPError          = "PLEX_HTTP_ERROR"
 	CodeQueueCreateFailed  = "PLEX_QUEUE_CREATE_FAILED"
@@ -77,6 +78,7 @@ var codeExit = map[string]int{
 	CodeCloudUnreachable:   ExitTransport,
 	CodeTransportTimeout:   ExitTransport,
 	CodeTransportFailed:    ExitTransport,
+	CodeDecodeError:        ExitInternal,
 	CodeServerError:        ExitPlex,
 	CodeHTTPError:          ExitPlex,
 	CodeQueueCreateFailed:  ExitPlex,

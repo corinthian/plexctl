@@ -43,7 +43,7 @@ Inputs: `docs/error_inventory.md` (P0.1, every emission site), `docs/skill_compe
 | 1 | user error — bad flags/args/invocation (`BAD_REQUEST`) | 64 (absorbed) and the misrouted exit-1 validation errors in streams.go |
 | 2 | Plex refused or errored (domain failures, HTTP 4xx/5xx semantics) | 1 |
 | 3 | transport — timeout, connection failure, unreachable client/cloud | 2 (timeout) and part of 1 |
-| 4 | internal plexctl bug (`INTERNAL`) | 1 |
+| 4 | internal plexctl bug, or a response plexctl could not decode (`INTERNAL`, `DECODE_ERROR`) | 1 |
 | 5 | not authenticated (`PLEX_AUTH_REQUIRED`) | 1 |
 | 6 | `NOT_APPLIED` — upstream said 2xx, verification shows nothing changed | 0 (silent no-op) or 1 |
 
@@ -72,6 +72,7 @@ Family rule for Subtrakt: the auth code contains `_AUTH_` so its cross-tool clas
 | `CLOUD_UNREACHABLE` | 3 | Transport failure against plex.tv (v1 `plex.tv ` prefix) | `plex.tv is unreachable — the local server is unaffected; retry shortly` | — |
 | `TRANSPORT_TIMEOUT` | 3 | `request timed out:` against PMS (`:32400`) | `retry — on batches, retry only timed-out items` | `url` |
 | `TRANSPORT_FAILED` | 3 | `connection failed:` / `request failed:` transport class against PMS | — | `url` |
+| `DECODE_ERROR` | 4 | Response body was not the single JSON value the endpoint promised, or exceeded the size bound. Never fires on a 4xx/5xx: the HTTP status is classified first and keeps its own code | — | `url` |
 | `PLEX_SERVER_ERROR` | 2 | PMS HTTP 5xx | — | — |
 | `PLEX_HTTP_ERROR` | 2 | Any other unmapped upstream HTTP >= 400 (carries `http_status`) | — | — |
 | `PLEX_QUEUE_CREATE_FAILED` | 2 | playQueue creation returned no `playQueueID`/`selectedItemID`; mid-add failure with rollback (`data.partialQueueID`, `data.rollbackAttempted`) | `retry the queue command` | `partialQueueID`, `rollbackAttempted` |
@@ -86,7 +87,7 @@ Family rule for Subtrakt: the auth code contains `_AUTH_` so its cross-tool clas
 | `NOT_APPLIED` | 6 | Upstream 2xx but verification shows nothing changed: bare `play` on an idle client (P3.1), queue-add whose post-add size verify shows no growth (replaces v1 "likely unknown or invalid"), any P1.3-verified mutation that no-ops | names the effective command, e.g. `client idle — start items with: plexctl play-media RATING_KEY` | command-specific |
 | `INTERNAL` | 4 | plexctl bug: impossible state, marshal failure, `could not retrieve server machineIdentifier` | `report this — plexctl bug` | — |
 
-30 codes incl. the warning-only one. The skill's v2 translation table maps code → phrase, ~1 row per code — down from 33 free-text rows + state-machine prose.
+31 codes incl. the warning-only one. The skill's v2 translation table maps code → phrase, ~1 row per code — down from 33 free-text rows + state-machine prose.
 
 ## 3. Migration mapping (v1 emission → v2)
 

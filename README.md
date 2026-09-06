@@ -45,7 +45,7 @@ Success: `{"ok": true, ...}`, one JSON document on stdout. Failure: `{"ok": fals
 - `1` — bad invocation (`BAD_REQUEST`: flags, args, validation) — never retry; fix the command
 - `2` — Plex refused or errored (domain failures, HTTP 4xx/5xx semantics)
 - `3` — transport (timeout, connection failure, unreachable client/cloud) — `TRANSPORT_TIMEOUT` items are safe to retry
-- `4` — internal plexctl bug
+- `4` — internal plexctl bug, or a response plexctl could not decode (`DECODE_ERROR`)
 - `5` — not authenticated — run `plexctl auth login`
 - `6` — `NOT_APPLIED`: upstream said 2xx but verification shows nothing changed (e.g. `play` on an idle client)
 

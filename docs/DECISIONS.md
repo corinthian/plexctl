@@ -11,3 +11,9 @@ plexctl can only bind to a client that PMS currently reports as reachable. No Pl
 This is a deliberate divergence from v1/cli.py parity, and the only behaviour it changes is that calls which used to fail now work: an explicit-key invocation that previously exited 2 (`PLEX_CLIENT_UNKNOWN`, `PLEX_CLIENT_INACTIVE`) or 3 (`CLOUD_UNREACHABLE`) succeeds. Nothing that succeeded before fails now, no envelope changes, and `PLEX_NOTHING_PLAYING` (exit 2) still guards the omitted-key idle case unchanged.
 
 `--client` passed alongside an explicit ratingKey is silently inert rather than rejected. Rejecting it would break habitual callers that always pass the flag, and there is no safety gain — no client participates in the operation.
+
+## Oversize responses map to `DECODE_ERROR`, not a new code — 2026-09-06
+
+A response body over plexctl's bound reports `DECODE_ERROR` at exit 4 with a message naming the bound, rather than a `RESPONSE_TOO_LARGE` of its own. Contract 2.5 fixed the new-code set at `TRANSPORT_FAILED` and `DECODE_ERROR`, and every additional public code is another row the deployed plex skill does not map — its code table is closed and has no catch-all.
+
+The `cause.Cause` stays distinct: `Oversize` and `Decode` are separate values, so tests and hints can tell a body that was too big from one that was malformed. The CLI code does not need the distinction, because the recovery is the same for both: report it, do not retry. A decode failure is deterministic and a body that exceeded the bound will exceed it again.

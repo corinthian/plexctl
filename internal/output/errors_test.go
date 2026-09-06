@@ -51,6 +51,7 @@ func TestCodeExitPairs(t *testing.T) {
 		CodeSmartContainer:     ExitPlex,
 		CodeUnsupported:        ExitPlex,
 		CodeNotApplied:         ExitNotApplied,
+		CodeDecodeError:        ExitInternal,
 		CodeInternal:           ExitInternal,
 	}
 	for code, want := range cases {
