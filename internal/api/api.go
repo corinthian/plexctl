@@ -105,8 +105,22 @@ func ResolveTimeout(flagSet bool, flagValue string) (time.Duration, error) {
 // message and every rejection names the value the user actually wrote.
 //
 // An absent key renders empty, which xduration.Resolve reads as unset.
+//
+// The read is TryLoad, not Load. Load is print-and-exit on an unparseable
+// file, and this now runs in root's PersistentPreRunE — before every RunE,
+// auth login's included. Aborting at PLEX_AUTH_REQUIRED here would kill the
+// one command whose whole job is to quarantine and repair an unusable config
+// (contract Part 3, plexctl row "Config unparseable, auth login", marked
+// unchanged). A file that cannot be parsed has no readable timeout in it
+// either, so a load failure is simply no candidate; every genuine
+// config-failure row still fires where the config is actually needed, at
+// config.Require and at api.Request's own load.
 func configTimeoutRaw() string {
-	raw, ok := config.Load()["timeout"]
+	cfg, err := config.TryLoad()
+	if err != nil {
+		return ""
+	}
+	raw, ok := cfg["timeout"]
 	if !ok {
 		return ""
 	}

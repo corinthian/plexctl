@@ -2,6 +2,7 @@ package commands_test
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -110,5 +111,48 @@ func TestSeekTimeoutUsesTheSameParser(t *testing.T) {
 				t.Fatalf("%v: want a BAD_REQUEST naming --timeout, got %s", args, out)
 			}
 		})
+	}
+}
+
+// TestCorruptConfigDoesNotBreakAuthLogin pins contract Part 3's plexctl row
+// "Config unparseable, auth login → login quarantines and merges, exit 0",
+// which is marked unchanged. Resolving the timeout in PersistentPreRunE runs
+// before every RunE, auth login's included, so reading the config there
+// through the print-and-exit config.Load would abort at PLEX_AUTH_REQUIRED 5
+// before login's quarantine-and-merge repair ever ran — the one command whose
+// whole job is to fix an unusable config.
+//
+// configTimeoutRaw uses config.TryLoad and treats a load failure as no
+// candidate. Nothing is lost: a file that cannot be parsed has no readable
+// timeout in it either, and every genuine config-failure row still fires
+// where the config is actually needed — config.Require and api.Request's own
+// load.
+func TestCorruptConfigDoesNotBreakAuthLogin(t *testing.T) {
+	dir := testutil.Setup(t, "http://127.0.0.1:1")
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("not toml at all ][\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PLEXCTL_TIMEOUT", "")
+
+	// `commands` reads no config of its own, so PersistentPreRunE is the only
+	// thing that could touch the file. It must complete.
+	oldArgs := os.Args
+	t.Cleanup(func() { os.Args = oldArgs })
+	os.Args = []string{"plexctl", "commands"}
+	out, code := testutil.Capture(t, commands.Execute)
+	if code == 5 {
+		t.Fatalf("a corrupt config aborted in PersistentPreRunE at exit 5; out=%s", out)
+	}
+	if strings.Contains(out, "PLEX_AUTH_REQUIRED") {
+		t.Fatalf("timeout resolution routed a corrupt config through the auth code: %s", out)
+	}
+
+	// And the timeout still resolves to the default rather than failing.
+	d, err := api.ResolveTimeout(false, "")
+	if err != nil {
+		t.Fatalf("a corrupt config made timeout resolution an error: %v", err)
+	}
+	if d != api.DefaultTimeout {
+		t.Fatalf("timeout = %v, want the default %v", d, api.DefaultTimeout)
 	}
 }
