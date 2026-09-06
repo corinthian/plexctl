@@ -12,7 +12,7 @@ allowed-tools:
   - "Bash(jq:*)"
 ---
 
-# Plex Skill (v2 — requires plexctl ≥ 2.0.0)
+# Plex Skill (v2 — requires plexctl ≥ 2.0.1)
 
 Goal: smooth find / watch / play UX. Hide plexctl noise. Never surface internal IDs, raw envelopes, or codes unless `debug_mode`.
 
