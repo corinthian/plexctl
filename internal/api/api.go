@@ -94,6 +94,11 @@ func (e *Error) Cause() cause.Cause { return e.cause }
 // constant, not a user setting: no flag, no environment variable, no config
 // key (contract 2.3). A body over it is never truncated and never decoded —
 // a partial body is worse than no body, because it can parse.
+//
+// Sized per contract 2.3: four times the largest observed response or 64 MiB,
+// whichever is greater. Measured 2026-09-06 on the wire against the live PMS:
+// full movie section 392,194 bytes; full episode listing (type=4) 5,850,651
+// bytes. Four times the larger is about 23 MiB, so the 64 MiB floor applies.
 const BodyLimit int64 = 64 << 20
 
 // OversizeError is the one *Error for a body over BodyLimit. The message
