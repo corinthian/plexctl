@@ -110,11 +110,9 @@ Table formats (two shapes only), the On Deck curated-list lifecycle, and the `q`
 
 ---
 
-## Personalisation (local-only)
+## Local files
 
-<!-- fenced:start -->
-> Local-only; ships empty. Record machine-specific preferences (viewing schedule, dictation habits, default watched/unwatched lens) between these markers in the installed copy at `~/.claude/skills/plex/SKILL.md`. The installed (NUC) copy is canonical: generic edits land there first and flow here with this section emptied; personal content never comes back here.
-<!-- fenced:end -->
+This repo copy is canonical for everything above: generic edits land here and are copied to `~/.claude/skills/plex/SKILL.md`. Three files in the installed skill directory are local-only and never flow back: `PERSONAL.md` (machine-specific preferences), `LESSONS.md` (the self-improvement log) and `INCIDENTS.md` (raw incident lines). Read `PERSONAL.md` first if it exists; its rules override defaults here. If it is missing, run with the defaults.
 
 ---
 
