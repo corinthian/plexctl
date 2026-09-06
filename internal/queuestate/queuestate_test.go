@@ -119,8 +119,15 @@ func TestWriteAllRemovesTmpFileOnRenameFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a rename error, got nil")
 	}
-	if _, statErr := os.Stat(statePath + ".tmp"); !os.IsNotExist(statErr) {
-		t.Fatalf("leftover .tmp file after failed rename: statErr=%v", statErr)
+	// atomicfile.Write names its temp with os.CreateTemp(dir, ".tmp-*"), so
+	// the assertion moves from a fixed path to a glob. What it pins is
+	// unchanged and is contract 2.8's rename-failure row: no temp survives.
+	leftovers, globErr := filepath.Glob(filepath.Join(dir, ".tmp-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("leftover temp files after failed rename: %v", leftovers)
 	}
 }
 
@@ -237,5 +244,61 @@ func TestSaveFileModesArePrivate(t *testing.T) {
 	}
 	if info, err := os.Stat(statePath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("queue_state.json mode after self-heal = %o, err=%v, want 0600", info.Mode().Perm(), err)
+	}
+}
+
+// TestQueueStateWriteKeepsLockIdentity pins contract 2.8's "locking is the
+// caller's job": the atomicfile adoption must not disturb plexctl's flock.
+// The lock is taken over queue_state.lock — a separate, stable inode, which
+// is the whole reason it is not the state file itself, whose inode changes
+// on every temp+rename — and withLock still wraps the entire
+// read-modify-write, so two concurrent mutators cannot lose an update.
+func TestQueueStateWriteKeepsLockIdentity(t *testing.T) {
+	dir := setup(t)
+	lockPath := filepath.Join(dir, "queue_state.lock")
+	statePath := filepath.Join(dir, "queue_state.json")
+
+	if err := queuestate.Save("mid-1", "q1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	lockBefore, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatalf("the lock file was not created at %s: %v", lockPath, err)
+	}
+	stateBefore, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := queuestate.Save("mid-2", "q2", "s2"); err != nil {
+		t.Fatal(err)
+	}
+	lockAfter, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateAfter, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !os.SameFile(lockBefore, lockAfter) {
+		t.Fatal("the lock file's inode changed across a write — the lock identity moved")
+	}
+	if os.SameFile(stateBefore, stateAfter) {
+		t.Fatal("the state file's inode did not change — the write was not a temp+rename")
+	}
+	// The read-modify-write is still whole: the second save must not have
+	// lost the first.
+	if queuestate.Load("mid-1") == nil || queuestate.Load("mid-2") == nil {
+		t.Fatal("a concurrent-safe read-modify-write lost an entry")
+	}
+	// No temp survives a successful write either.
+	leftovers, err := filepath.Glob(filepath.Join(dir, ".tmp-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("leftover temp files after a successful write: %v", leftovers)
 	}
 }

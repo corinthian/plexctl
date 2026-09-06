@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/corinthian/plexctl/internal/api"
+	"github.com/corinthian/plexctl/internal/atomicfile"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
@@ -114,12 +115,11 @@ func nextPersistedCommandID(minExclusive int64) (int64, bool) {
 	// Atomic write: temp file + rename, so the value file is never observed
 	// partial or empty (mirrors queuestate.writeAll). This is the sole
 	// guarantor of cross-process monotonicity across a crash.
-	tmp := commandIDPath() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(next, 10)), 0o600); err != nil {
-		return 0, false
-	}
-	if err := os.Rename(tmp, commandIDPath()); err != nil {
-		_ = os.Remove(tmp) // best-effort: don't leave a stale .tmp behind on a failed rename
+	// atomicfile: unique temp in the target's own directory, 0600 before any
+	// write, fsync, rename, temp removed on every failing path. An error here
+	// is the same signal os.WriteFile or os.Rename returning one was, and the
+	// in-memory reseed fallback in nextCommandID is unchanged.
+	if err := atomicfile.Write(commandIDPath(), []byte(strconv.FormatInt(next, 10))); err != nil {
 		return 0, false
 	}
 	return next, true

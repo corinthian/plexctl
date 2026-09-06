@@ -265,8 +265,15 @@ func TestNextPersistedCommandIDRemovesTmpFileOnRenameFailure(t *testing.T) {
 	if ok {
 		t.Fatal("expected ok=false after a rename failure")
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "commandid.tmp")); !os.IsNotExist(statErr) {
-		t.Fatalf("leftover commandid.tmp after failed rename: statErr=%v", statErr)
+	// atomicfile.Write names its temp with os.CreateTemp(dir, ".tmp-*"), so
+	// the assertion moves from a fixed path to a glob. What it pins is
+	// unchanged: no temp survives a failed rename (contract 2.8).
+	leftovers, globErr := filepath.Glob(filepath.Join(dir, ".tmp-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("leftover temp files after failed rename: %v", leftovers)
 	}
 }
 
