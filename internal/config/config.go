@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	toml "github.com/pelletier/go-toml/v2"
 
@@ -22,6 +23,18 @@ var Defaults = map[string]string{
 	"default_client": "Apple TV",
 	"client_id":      "plexctl-default",
 }
+
+// reads counts attempts to read config.toml. It exists so a test can assert
+// how often the file is touched: contract 2.7 narrows plexctl's change to
+// load frequency, and frequency is not observable any other way. Nothing in
+// the CLI reads it.
+var reads atomic.Int64
+
+// Reads returns the number of config-file read attempts so far. Test-only.
+func Reads() int64 { return reads.Load() }
+
+// ResetReads zeroes the read counter. Test-only.
+func ResetReads() { reads.Store(0) }
 
 // Dir returns the plexctl config directory.
 func Dir() string {
@@ -46,12 +59,21 @@ func Path() string {
 func Load() jsonx.J {
 	m, err := TryLoad()
 	if err != nil {
-		output.FailErr(output.Err(output.CodeAuthRequired,
-			fmt.Sprintf("invalid config at %s: %v — run plexctl auth login", Path(), err)).
-			WithHint("run: plexctl auth login"))
-		return jsonx.J{} // reached only when output.Exit is a test seam
+		return FailUnusable(err)
 	}
 	return m
+}
+
+// FailUnusable is Load's failure half, split out so internal/app's lazily
+// loaded per-invocation config fails through exactly the same envelope. Every
+// config failure — a missing file, an unreadable one, a directory at the
+// path, unparseable TOML — stays PLEX_AUTH_REQUIRED at exit 5 (contract Part
+// 3, plexctl config rows, all "unchanged").
+func FailUnusable(err error) jsonx.J {
+	output.FailErr(output.Err(output.CodeAuthRequired,
+		fmt.Sprintf("invalid config at %s: %v — run plexctl auth login", Path(), err)).
+		WithHint("run: plexctl auth login"))
+	return jsonx.J{} // reached only when output.Exit is a test seam
 }
 
 // TryLoad parses config.toml without Load's print-and-exit failure mode.
@@ -66,6 +88,7 @@ func Load() jsonx.J {
 // through a rename, so "unreadable" reported as "absent" silently destroys
 // every unmanaged key the file held.
 func TryLoad() (jsonx.J, error) {
+	reads.Add(1)
 	b, err := os.ReadFile(Path())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -95,7 +118,14 @@ func StringOr(cfg jsonx.J, key, def string) string {
 // Require mirrors config.require: falsy value → print the standard error and
 // exit 1.
 func Require(key string) string {
-	v := Load()[key]
+	return RequireFrom(Load(), key)
+}
+
+// RequireFrom is Require against a config that has already been loaded, so
+// internal/app can satisfy a Require from its one memoised read without
+// reading the file again. The envelope is unchanged.
+func RequireFrom(cfg jsonx.J, key string) string {
+	v := cfg[key]
 	if !jsonx.Truthy(v) {
 		output.FailErr(output.Err(output.CodeAuthRequired,
 			fmt.Sprintf("missing config key: %s — run plexctl auth login", key)).

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/corinthian/plexctl/internal/api"
-	"github.com/corinthian/plexctl/internal/config"
+	"github.com/corinthian/plexctl/internal/app"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
 )
@@ -282,7 +282,7 @@ func resolveIn(clientList []jsonx.J, target string) jsonx.J {
 func Resolve(name string) jsonx.J {
 	target := name
 	if target == "" {
-		target = config.Require("default_client")
+		target = app.Current().Require("default_client")
 	}
 	return resolveIn(ListClients(), target)
 }

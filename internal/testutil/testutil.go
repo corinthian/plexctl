@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/corinthian/plexctl/internal/app"
 	"github.com/corinthian/plexctl/internal/output"
 )
 
@@ -26,6 +27,10 @@ func Setup(t *testing.T, serverURL string) string {
 		t.Fatal(err)
 	}
 	t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+	// The per-invocation App memoises the config, and a test that redirects
+	// the directory must not inherit the previous test's read. This is the
+	// seam internal/app documents as test-only.
+	app.Reset()
 	return dir
 }
 

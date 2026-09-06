@@ -37,3 +37,13 @@ On the success path a failed write is `INTERNAL` at exit 4. On the NDJSON path t
 On the error path the envelope is not retried. A single plain-text line goes to stderr — `plexctl: cannot write output: <io error> (original error: <CODE>)` — and the exit becomes 4 rather than the original code's class. The failure the caller now has is that plexctl could not report anything, which is an internal failure whatever the original was.
 
 `EPIPE` is deliberately not special-cased. The Go runtime re-raises `SIGPIPE` on a broken fd 1 and the process dies before the write returns, so `plexctl … | head` never reaches this path.
+
+## The config is a lazily loaded per-invocation value on `internal/app` — 2026-09-06
+
+`config.Load()` was called from six places and `config.Require` from three, so a single PMS-backed command read `config.toml` ten times, and `plexctl commands` or a cobra argument rejection could read it at all. The file is now read at most once per invocation, on first use, through an `App` that root installs in `PersistentPreRunE`. Help, discovery and argument errors never touch it.
+
+`--config` is still deliberately absent. `auth login`'s quarantine-and-merge repair depends on the current load shape — it reads through `TryLoad`, moves an unusable file aside and merges the auth-managed keys back — and an explicit-path surface would have to answer what "explicit" means for a directory-scoped tool whose queue state and command-ID counter follow the same `PLEXCTL_CONFIG_DIR`. Every config-failure envelope is unchanged: a missing file, an unreadable one, a directory at the path and unparseable TOML all stay `PLEX_AUTH_REQUIRED` at exit 5.
+
+The timeout's config candidate reads the same memoised load, tolerantly: a file that cannot be parsed has no readable timeout in it either, so a load failure is no candidate rather than an abort that would kill the one command able to repair the file.
+
+`app.Current()` is a process-scoped value, not an injected one, and that is the deliberate part. Contract 2.7 asks for a lazily loaded per-invocation config and does not say how the read sites reach it; threading an `*App` through `api.Get`, `api.TryGet` and their siblings would change six exported signatures and about fifty domain call sites for no observable behaviour, against 11k lines of tests. Phase C3b is where an injected writer and real dependency injection land. `internal/app` is the seam that pass replaces: everything process-scoped is behind `Set`, `Current` and `Reset`, in one package, so the later change is a constructor and a parameter rather than a hunt.

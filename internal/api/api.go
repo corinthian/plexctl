@@ -15,8 +15,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/corinthian/plexctl/internal/app"
 	"github.com/corinthian/plexctl/internal/cause"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
@@ -36,11 +38,15 @@ const plexTV = "https://plex.tv"
 // DefaultTimeout is the timeout used when no source supplies one.
 const DefaultTimeout = 10 * time.Second
 
-// resolvedTimeout is the per-invocation timeout, resolved once by root's
-// PersistentPreRunE and read by every client constructor. It is a resolved
-// value with no parsing left in it: the grammar is enforced at the boundary,
-// in ResolveTimeout.
-var resolvedTimeout = DefaultTimeout
+// resolvedTimeout is the per-invocation timeout once a source that costs
+// nothing to read has supplied one — the flag, the environment, or the
+// config file after Timeout() has gone and looked. nil means no source has
+// been consulted yet. It is a resolved value with no parsing left in it: the
+// grammar is enforced at the boundary, in ResolveTimeout.
+var (
+	timeoutMu       sync.Mutex
+	resolvedTimeout *time.Duration
+)
 
 // timeoutForTest, when set, wins over the resolved value. It has to: root's
 // PersistentPreRunE resolves on every invocation, so a test that forces a
@@ -51,14 +57,45 @@ var timeoutForTest *time.Duration
 // SetTimeout stores the resolved timeout. root's PersistentPreRunE (and
 // seek's own in-RunE resolution, which DisableFlagParsing forces) are the
 // only production callers.
-func SetTimeout(d time.Duration) { resolvedTimeout = d }
+func SetTimeout(d time.Duration) {
+	timeoutMu.Lock()
+	defer timeoutMu.Unlock()
+	resolvedTimeout = &d
+}
 
-// Timeout returns the resolved per-invocation timeout.
+// ResetTimeout discards the previous invocation's resolution. root calls it
+// once per invocation, before resolving.
+func ResetTimeout() {
+	timeoutMu.Lock()
+	defer timeoutMu.Unlock()
+	resolvedTimeout = nil
+}
+
+// Timeout returns the resolved per-invocation timeout, consulting the config
+// file only if it must — that is, only when neither the flag nor the
+// environment supplied one, and only at the first client construction. Help,
+// discovery and argument errors never get this far, which is what keeps them
+// off the file (contract 2.7).
+//
+// The config candidate is the one source that can fail here rather than in
+// PersistentPreRunE, so the rejection is emitted directly: BAD_REQUEST at
+// exit 1, the same code and exit every other rejected timeout gets.
 func Timeout() time.Duration {
 	if timeoutForTest != nil {
 		return *timeoutForTest
 	}
-	return resolvedTimeout
+	timeoutMu.Lock()
+	defer timeoutMu.Unlock()
+	if resolvedTimeout != nil {
+		return *resolvedTimeout
+	}
+	d, err := xduration.Resolve(DefaultTimeout, configTimeoutCandidate())
+	if err != nil {
+		output.FailErr(output.Err(output.CodeBadRequest, err.Error()))
+		return DefaultTimeout // reached only when output.Exit is a test seam
+	}
+	resolvedTimeout = &d
+	return d
 }
 
 // SetTimeoutForTest forces a timeout directly, bypassing the parser. It is
@@ -69,6 +106,32 @@ func SetTimeoutForTest(d time.Duration) { timeoutForTest = &d }
 
 // ClearTimeoutForTest restores the default. Test-only, as above.
 func ClearTimeoutForTest() { timeoutForTest = nil }
+
+// ResolveTimeoutEager resolves the two sources that cost nothing to read: the
+// flag and the environment. ok is false when neither is present, in which
+// case the config file decides and is not read here — root calls this from
+// PersistentPreRunE, which runs before every command including the ones that
+// must never touch the file.
+func ResolveTimeoutEager(flagSet bool, flagValue string) (time.Duration, bool, error) {
+	if flagSet {
+		d, err := xduration.Parse(flagValue, "--timeout")
+		return d, err == nil, err
+	}
+	raw := os.Getenv("PLEXCTL_TIMEOUT")
+	if raw == "" {
+		return 0, false, nil
+	}
+	d, err := xduration.Parse(raw, "$PLEXCTL_TIMEOUT")
+	return d, err == nil, err
+}
+
+// configTimeoutCandidate is the config file's candidate, read fresh.
+func configTimeoutCandidate() xduration.Candidate {
+	return xduration.Candidate{
+		Source: "config timeout (" + config.Path() + ")",
+		Value:  configTimeoutRaw(),
+	}
+}
 
 // ResolveTimeout resolves the timeout from --timeout, $PLEXCTL_TIMEOUT and
 // the config file, in that order, under xduration's integer-seconds grammar.
@@ -90,10 +153,7 @@ func ResolveTimeout(flagSet bool, flagValue string) (time.Duration, error) {
 	}
 	candidates := []xduration.Candidate{{Source: "$PLEXCTL_TIMEOUT", Value: os.Getenv("PLEXCTL_TIMEOUT")}}
 	if candidates[0].Value == "" {
-		candidates = append(candidates, xduration.Candidate{
-			Source: "config timeout (" + config.Path() + ")",
-			Value:  configTimeoutRaw(),
-		})
+		candidates = append(candidates, configTimeoutCandidate())
 	}
 	return xduration.Resolve(DefaultTimeout, candidates...)
 }
@@ -106,17 +166,13 @@ func ResolveTimeout(flagSet bool, flagValue string) (time.Duration, error) {
 //
 // An absent key renders empty, which xduration.Resolve reads as unset.
 //
-// The read is TryLoad, not Load. Load is print-and-exit on an unparseable
-// file, and this now runs in root's PersistentPreRunE — before every RunE,
-// auth login's included. Aborting at PLEX_AUTH_REQUIRED here would kill the
-// one command whose whole job is to quarantine and repair an unusable config
-// (contract Part 3, plexctl row "Config unparseable, auth login", marked
-// unchanged). A file that cannot be parsed has no readable timeout in it
-// either, so a load failure is simply no candidate; every genuine
-// config-failure row still fires where the config is actually needed, at
-// config.Require and at api.Request's own load.
+// The read goes through the invocation's App, tolerantly: it shares the one
+// memoised load with every other config reader, so a command that resolves a
+// timeout and then makes three requests still touches the file once, and a
+// file that cannot be parsed is simply no candidate rather than a
+// PLEX_AUTH_REQUIRED abort that would kill auth login before its repair ran.
 func configTimeoutRaw() string {
-	cfg, err := config.TryLoad()
+	cfg, err := app.Current().TryConfig()
 	if err != nil {
 		return ""
 	}
@@ -203,7 +259,7 @@ func Headers(token, clientID string) map[string]string {
 
 // ServerBase is the configured PMS base URL.
 func ServerBase() string {
-	return config.StringOr(config.Load(), "server_url", config.Defaults["server_url"])
+	return config.StringOr(app.Current().Config(), "server_url", config.Defaults["server_url"])
 }
 
 // BuildURL joins base+path and appends params. path may already carry a
@@ -271,8 +327,8 @@ func classifyTransport(err error) *Error {
 // The return is any because plex.tv endpoints return JSON arrays; PMS
 // endpoints return objects.
 func Request(method, base, path string, params url.Values) (any, error) {
-	cfg := config.Load()
-	token := config.Require("token")
+	cfg := app.Current().Config()
+	token := app.Current().Require("token")
 	clientID := config.StringOr(cfg, "client_id", config.Defaults["client_id"])
 	req, err := http.NewRequest(method, BuildURL(base, path, params), nil)
 	if err != nil {

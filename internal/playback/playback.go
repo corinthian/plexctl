@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/corinthian/plexctl/internal/api"
+	"github.com/corinthian/plexctl/internal/app"
 	"github.com/corinthian/plexctl/internal/atomicfile"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
@@ -152,8 +153,8 @@ func nextCommandID() int64 {
 // companionHeaders builds the header set shared by _player_cmd and
 // _player_get in the Python original.
 func companionHeaders(client jsonx.J) map[string]string {
-	cfg := config.Load()
-	token := config.Require("token")
+	cfg := app.Current().Config()
+	token := app.Current().Require("token")
 	clientID := config.StringOr(cfg, "client_id", config.Defaults["client_id"])
 	headers := api.Headers(token, clientID)
 	headers["X-Plex-Target-Client-Identifier"] = jsonx.AsStr(client["machineIdentifier"])
@@ -557,7 +558,7 @@ func PlayQueue(client jsonx.J, queueID, selectedItemID string) (jsonx.J, *output
 	if serverID == "" {
 		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
-	cfg := config.Load()
+	cfg := app.Current().Config()
 	serverURL := config.StringOr(cfg, "server_url", config.Defaults["server_url"])
 	address, port := hostPort(serverURL)
 	params := map[string]string{
@@ -580,7 +581,7 @@ func PlayMedia(client jsonx.J, ratingKey string) (jsonx.J, *output.CLIError) {
 	if serverID == "" {
 		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
-	cfg := config.Load()
+	cfg := app.Current().Config()
 	serverURL := config.StringOr(cfg, "server_url", config.Defaults["server_url"])
 	address, port := hostPort(serverURL)
 	key := "/library/metadata/" + ratingKey

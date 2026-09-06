@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/corinthian/plexctl/internal/api"
+	"github.com/corinthian/plexctl/internal/app"
 	"github.com/corinthian/plexctl/internal/output"
 )
 
@@ -46,16 +47,29 @@ in this tree.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// Resolved once, here, for every command. Any rejection —
-			// whatever the source — is a BAD_REQUEST at exit 1: plexctl's
-			// closed map has no config family, and routing a numeric typo
-			// through PLEX_AUTH_REQUIRED would tell the user to run
-			// auth login (contract 2.7, plexctl exception).
-			d, err := api.ResolveTimeout(cmd.Root().PersistentFlags().Changed("timeout"), timeoutFlag)
+			// One App per invocation, installed before anything can read
+			// through it. Constructing it reads nothing: the config file is
+			// loaded at most once, on first use, so help, discovery and
+			// argument errors never touch it (contract 2.7).
+			app.Set(app.New())
+			api.ResetTimeout()
+			// The flag and the environment are resolved here, eagerly, so a
+			// rejected value is an error before any request. The config file
+			// is not: reading it here is the load frequency contract 2.7
+			// narrows, and it decides only if neither of the other two
+			// spoke — lazily, at the first client construction.
+			//
+			// Any rejection — whatever the source — is a BAD_REQUEST at
+			// exit 1: plexctl's closed map has no config family, and routing
+			// a numeric typo through PLEX_AUTH_REQUIRED would tell the user
+			// to run auth login (contract 2.7, plexctl exception).
+			d, ok, err := api.ResolveTimeoutEager(cmd.Root().PersistentFlags().Changed("timeout"), timeoutFlag)
 			if err != nil {
 				return err
 			}
-			api.SetTimeout(d)
+			if ok {
+				api.SetTimeout(d)
+			}
 			return nil
 		},
 	}
