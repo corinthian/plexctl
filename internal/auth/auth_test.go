@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -283,5 +286,100 @@ func TestAuthLoginTimeoutsAreNotOverridable(t *testing.T) {
 	}
 	if c := api.NewHTTPClient(verifyTimeout, nil); c.Timeout != 10*time.Second {
 		t.Errorf("verify client timeout = %v, want 10s", c.Timeout)
+	}
+}
+
+// TestAuthOversizeBodyIsDecodeError pins contract 2.3 on the sign-in leg:
+// the 32 MiB silent truncation is gone, and an oversize body is DECODE_ERROR
+// at exit 4 naming the bound — not the CLOUD_UNREACHABLE "retry shortly"
+// advice that a deterministic failure cannot act on.
+func TestAuthOversizeBodyIsDecodeError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 64 MiB body")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 1<<20)
+		remaining := api.BodyLimit + 1
+		for remaining > 0 {
+			n := int64(len(buf))
+			if remaining < n {
+				n = remaining
+			}
+			w.Write(buf[:n])
+			remaining -= n
+		}
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, cliErr := readSignInBody(resp)
+	if cliErr == nil {
+		t.Fatalf("want a CLIError, got body of %d bytes", len(body))
+	}
+	if cliErr.Code != output.CodeDecodeError || cliErr.ExitCode() != 4 {
+		t.Fatalf("code = %q exit %d, want DECODE_ERROR exit 4", cliErr.Code, cliErr.ExitCode())
+	}
+	if cliErr.Hint != "" {
+		t.Fatalf("DECODE_ERROR must carry no hint, got %q", cliErr.Hint)
+	}
+	if !strings.Contains(cliErr.Message, "64 MiB") {
+		t.Fatalf("message does not name the bound: %q", cliErr.Message)
+	}
+}
+
+// TestAuthOversizeOn401KeepsAuthFailed is the ordering half: the status is
+// classified before the read failure.
+func TestAuthOversizeOn401KeepsAuthFailed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 64 MiB body")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		buf := make([]byte, 1<<20)
+		remaining := api.BodyLimit + 1
+		for remaining > 0 {
+			n := int64(len(buf))
+			if remaining < n {
+				n = remaining
+			}
+			w.Write(buf[:n])
+			remaining -= n
+		}
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cliErr := readSignInBody(resp)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeAuthFailed || cliErr.ExitCode() != 2 {
+		t.Fatalf("code = %q exit %d, want PLEX_AUTH_FAILED exit 2", cliErr.Code, cliErr.ExitCode())
+	}
+}
+
+// TestAuthExactLimitBodySucceeds pins the boundary on this leg too.
+func TestAuthExactLimitBodySucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"user":{"authToken":"t"}}`))
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, cliErr := readSignInBody(resp)
+	if cliErr != nil {
+		t.Fatalf("unexpected error: %v", cliErr)
+	}
+	if !strings.Contains(string(body), "authToken") {
+		t.Fatalf("body did not survive: %q", body)
 	}
 }

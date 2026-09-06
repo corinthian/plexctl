@@ -7,8 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,6 +23,7 @@ import (
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
+	"github.com/corinthian/plexctl/internal/xhttp"
 )
 
 const plexTVSignIn = "https://plex.tv/users/sign_in.json"
@@ -62,6 +63,35 @@ func loadOrQuarantineConfig() (jsonx.J, string, *output.CLIError) {
 			fmt.Sprintf("config at %s is unusable (%v) and could not be moved aside: %v", config.Path(), loadErr, err))
 	}
 	return jsonx.J{}, backup, nil
+}
+
+const authFailedHint = "check credentials and retry: plexctl auth login"
+
+// readSignInBody performs the bounded read of a plex.tv sign-in response and
+// the triage that follows it. Extracted as a seam for the same reason
+// loadOrQuarantineConfig is: Login reads stdin and posts to a const plex.tv
+// URL, so it cannot be driven end to end, and this can.
+//
+// The order is fixed by contract 2.3: a part-way read failure is a genuine
+// transport failure and keeps the cloud target's code; the HTTP status is
+// classified next, so an oversize body never converts a 4xx or 5xx into a
+// decode error; only then is oversize itself reported, as DECODE_ERROR at
+// exit 4 with the bound named.
+func readSignInBody(resp *http.Response) ([]byte, *output.CLIError) {
+	// ReadBody closes the body on every path, so there is no defer here.
+	body, readErr := xhttp.ReadBody(resp, api.BodyLimit)
+	oversize := errors.Is(readErr, xhttp.ErrOversize)
+	if readErr != nil && !oversize {
+		return nil, api.Classify(api.AsError(readErr), api.TargetCloud)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, output.Err(output.CodeAuthFailed,
+			fmt.Sprintf("auth failed: HTTP %d", resp.StatusCode)).WithHint(authFailedHint)
+	}
+	if oversize {
+		return nil, api.Classify(api.OversizeError(http.MethodPost, plexTVSignIn), api.TargetCloud)
+	}
+	return body, nil
 }
 
 // mergeConfigPairs overlays the four auth-managed keys onto whatever's
@@ -223,18 +253,9 @@ func Login() {
 		output.FailErr(api.Classify(api.AsError(err), api.TargetCloud))
 		return
 	}
-	defer resp.Body.Close()
-	// plex.tv sign-in responses are small; the 32 MiB cap just matches the
-	// PMS/Companion bounded reads, and truncation would surface as a JSON
-	// parse error downstream, not a sentinel to handle.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil {
-		output.FailErr(api.Classify(api.AsError(err), api.TargetCloud))
-		return
-	}
-	const authFailedHint = "check credentials and retry: plexctl auth login"
-	if resp.StatusCode >= 400 {
-		output.FailErr(output.Err(output.CodeAuthFailed, fmt.Sprintf("auth failed: HTTP %d", resp.StatusCode)).WithHint(authFailedHint))
+	body, signInErr := readSignInBody(resp)
+	if signInErr != nil {
+		output.FailErr(signInErr)
 		return
 	}
 

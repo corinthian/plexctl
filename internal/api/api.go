@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,10 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/corinthian/plexctl/internal/cause"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/xduration"
+	"github.com/corinthian/plexctl/internal/xhttp"
 )
 
 // Version is the X-Plex-Version header value and the CLI version. It's a
@@ -140,9 +141,37 @@ type Error struct {
 	Message string
 	Kind    string
 	Status  int
+	// cause is set only where this package knows the classification better
+	// than any inspection of an underlying error could: an oversize body and
+	// a strict-decode failure. It is returned verbatim by Cause(), with no
+	// fallback to sniffing — xhttp.Classify consults cause.Coded first and
+	// stops there, which is exactly what keeps a part-way read failure a
+	// transport failure rather than letting its unexpected-EOF text be read
+	// as a decode error.
+	cause cause.Cause
 }
 
 func (e *Error) Error() string { return e.Message }
+
+// Cause satisfies cause.Coded.
+func (e *Error) Cause() cause.Cause { return e.cause }
+
+// BodyLimit bounds every response body plexctl reads. It is a library
+// constant, not a user setting: no flag, no environment variable, no config
+// key (contract 2.3). A body over it is never truncated and never decoded —
+// a partial body is worse than no body, because it can parse.
+const BodyLimit int64 = 64 << 20
+
+// OversizeError is the one *Error for a body over BodyLimit. The message
+// names the bound and the request; it never carries the query string,
+// because path is the request path as plexctl built it.
+func OversizeError(method, path string) *Error {
+	return &Error{
+		Message: fmt.Sprintf("response body from %s %s exceeds the %d MiB bound", method, path, BodyLimit>>20),
+		Kind:    "error",
+		cause:   cause.Oversize,
+	}
+}
 
 // Headers returns the standard Plex header set. X-Plex-Provides: controller
 // is required on every PMS request or /clients returns an empty list.
@@ -244,16 +273,25 @@ func Request(method, base, path string, params url.Values) (any, error) {
 	if err != nil {
 		return nil, classifyTransport(err)
 	}
-	defer resp.Body.Close()
-	// PMS library responses are legitimately large; 32 MiB just yields a
-	// JSON parse error downstream on truncation, not a sentinel to handle.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil {
-		return nil, classifyTransport(err)
+	// ReadBody closes the body on every path, oversize and I/O failure
+	// included, so there is no defer here.
+	body, readErr := xhttp.ReadBody(resp, BodyLimit)
+	oversize := errors.Is(readErr, xhttp.ErrOversize)
+	if readErr != nil && !oversize {
+		// A read that fails part-way is a genuine transport failure and
+		// keeps its target code; only oversize and decode move to
+		// DECODE_ERROR.
+		return nil, classifyTransport(readErr)
 	}
+	// The status is classified first: an oversize body never converts a 4xx
+	// or a 5xx into a decode error (contract 2.3). body is nil in that case,
+	// so FormatHTTPError falls back to the reason phrase.
 	if resp.StatusCode >= 400 {
 		reason := http.StatusText(resp.StatusCode)
 		return nil, &Error{Message: FormatHTTPError(resp.StatusCode, resp.Header.Get("Content-Type"), string(body), reason), Kind: "error", Status: resp.StatusCode}
+	}
+	if oversize {
+		return nil, OversizeError(method, path)
 	}
 	if strings.TrimSpace(string(body)) == "" {
 		return jsonx.J{}, nil
@@ -286,6 +324,16 @@ const (
 // docs/error_model_v2.md §3: transport errors code by target, HTTP statuses
 // by class. The chokepoint for every coded failure that starts as HTTP.
 func Classify(e *Error, target Target) *output.CLIError {
+	// The cause is tested before the target switch. xhttp.Classify consults
+	// cause.Coded first, so an *Error that knows its own cause is
+	// authoritative and no message sniffing is involved. A decode or
+	// oversize failure is DECODE_ERROR whatever the leg it came from, and it
+	// carries no hint: "retry shortly" and "wake the device" are advice that
+	// cannot help here (contract 2.5, plexctl's target asymmetry).
+	switch xhttp.Classify(e) {
+	case cause.Oversize, cause.Decode:
+		return output.Err(output.CodeDecodeError, e.Message)
+	}
 	if e.Status == 0 {
 		switch target {
 		case TargetCloud:

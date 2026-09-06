@@ -989,3 +989,76 @@ func TestCommandIDFileModesArePrivate(t *testing.T) {
 		t.Fatalf("commandid mode after self-heal = %o, err=%v, want 0600", info.Mode().Perm(), err)
 	}
 }
+
+// oversizeCompanion serves a body one byte over api.BodyLimit at the given
+// status.
+func oversizeCompanion(t *testing.T, status int) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if status != 200 {
+			w.WriteHeader(status)
+		}
+		w.Write([]byte(`{"pad":"`))
+		buf := make([]byte, 1<<20)
+		for i := range buf {
+			buf[i] = ' '
+		}
+		remaining := api.BodyLimit + 1 - 10
+		for remaining > 0 {
+			n := int64(len(buf))
+			if remaining < n {
+				n = remaining
+			}
+			w.Write(buf[:n])
+			remaining -= n
+		}
+		w.Write([]byte(`"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestCompanionOversizeIsDecodeError pins contract 2.3's scope line: the
+// bound applies to every response read, the Companion leg included, even
+// though a Companion response need not be JSON. Before this the read
+// truncated at 32 MiB in silence.
+func TestCompanionOversizeIsDecodeError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 64 MiB body")
+	}
+	url := oversizeCompanion(t, 200)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	_, cliErr := playerCmd(fakeClient(url), "/player/playback/play", nil)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeDecodeError || cliErr.ExitCode() != 4 {
+		t.Fatalf("code = %q exit %d, want DECODE_ERROR exit 4", cliErr.Code, cliErr.ExitCode())
+	}
+	if cliErr.Hint != "" {
+		t.Fatalf("DECODE_ERROR must carry no hint, got %q", cliErr.Hint)
+	}
+	if !strings.Contains(cliErr.Message, "64 MiB") {
+		t.Fatalf("message does not name the bound: %q", cliErr.Message)
+	}
+}
+
+// TestCompanionOversizeOn404KeepsHTTPCode is the ordering half: the status
+// is classified before the read failure, so an oversize body never converts
+// a 4xx from the client into a decode error.
+func TestCompanionOversizeOn404KeepsHTTPCode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 64 MiB body")
+	}
+	url := oversizeCompanion(t, 404)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	_, cliErr := playerCmd(fakeClient(url), "/player/playback/play", nil)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeHTTPError || cliErr.HTTPStatus != 404 {
+		t.Fatalf("code = %q status %d, want PLEX_HTTP_ERROR 404", cliErr.Code, cliErr.HTTPStatus)
+	}
+}
