@@ -296,14 +296,14 @@ func Request(method, base, path string, params url.Values) (any, error) {
 	if strings.TrimSpace(string(body)) == "" {
 		return jsonx.J{}, nil
 	}
-	// UseNumber keeps PMS number literals verbatim through the pass-through
-	// paths (9.0 stays 9.0, like Python's json round-trip), instead of
-	// float64's shortest-form re-rendering.
-	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.UseNumber()
+	// DecodeOne requires exactly one JSON value: a valid prefix followed by
+	// anything but whitespace is a decode error, whether or not it parses.
+	// It sets UseNumber itself, so PMS number literals still survive
+	// verbatim through the pass-through paths (9.0 stays 9.0, like Python's
+	// json round-trip) instead of being re-rendered through float64.
 	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, &Error{Message: "invalid JSON response: " + err.Error(), Kind: "error"}
+	if err := xhttp.DecodeOne(body, &v); err != nil {
+		return nil, &Error{Message: "invalid JSON response: " + err.Error(), Kind: "error", cause: cause.Decode}
 	}
 	return v, nil
 }
@@ -345,7 +345,7 @@ func Classify(e *Error, target Target) *output.CLIError {
 		default:
 			if e.Kind == "timeout" {
 				return output.Err(output.CodeTransportTimeout, e.Message).
-					WithHint("retry — on batches, retry only timed-out items")
+					WithHint("retry — the request may already have been applied; on batches, retry only timed-out items")
 			}
 			return output.Err(output.CodeTransportFailed, e.Message)
 		}

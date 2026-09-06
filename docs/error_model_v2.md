@@ -70,7 +70,7 @@ Family rule for Subtrakt: the auth code contains `_AUTH_` so its cross-tool clas
 | `PLEX_CLIENT_AMBIGUOUS` | 2 | Two active devices share the name | `target by machineIdentifier — run: plexctl clients` | `matches` |
 | `PLEX_CLIENT_UNREACHABLE` | 3 | Transport failure on a Companion/`:32500`/`/player/` URL — device asleep or gone; includes queue bind transport failures (paired with `PLEX_QUEUE_STAGED` per §5 precedence: the queue code wins, `clientUnreachable: true` rides in `data`) | `wake the device / relaunch Plex on it, then retry` | `client`, `url` |
 | `CLOUD_UNREACHABLE` | 3 | Transport failure against plex.tv (v1 `plex.tv ` prefix) | `plex.tv is unreachable — the local server is unaffected; retry shortly` | — |
-| `TRANSPORT_TIMEOUT` | 3 | `request timed out:` against PMS (`:32400`) | `retry — on batches, retry only timed-out items` | `url` |
+| `TRANSPORT_TIMEOUT` | 3 | `request timed out:` against PMS (`:32400`) | `retry — the request may already have been applied; on batches, retry only timed-out items` | `url` |
 | `TRANSPORT_FAILED` | 3 | `connection failed:` / `request failed:` transport class against PMS | — | `url` |
 | `DECODE_ERROR` | 4 | Response body was not the single JSON value the endpoint promised, or exceeded the size bound. Never fires on a 4xx/5xx: the HTTP status is classified first and keeps its own code | — | `url` |
 | `PLEX_SERVER_ERROR` | 2 | PMS HTTP 5xx | — | — |

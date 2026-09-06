@@ -13,6 +13,7 @@ import (
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
 
@@ -141,6 +142,9 @@ func TestConnectionRefusedClassifies(t *testing.T) {
 	}
 }
 
+// TestInvalidJSONClassifies: the message is unchanged, but the code and exit
+// move from TRANSPORT_FAILED 3 to DECODE_ERROR 4 (contract Part 3, plexctl
+// decode rows). A malformed body is not a transport failure and never was.
 func TestInvalidJSONClassifies(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("<xml>not json</xml>"))
@@ -150,6 +154,10 @@ func TestInvalidJSONClassifies(t *testing.T) {
 	_, err := api.TryGet("/x", nil)
 	if err == nil || !strings.HasPrefix(err.Error(), "invalid JSON response:") {
 		t.Fatalf("want invalid JSON classification, got %v", err)
+	}
+	cli := api.Classify(api.AsError(err), api.TargetPMS)
+	if cli.Code != output.CodeDecodeError || cli.ExitCode() != 4 {
+		t.Fatalf("code = %q exit %d, want DECODE_ERROR exit 4", cli.Code, cli.ExitCode())
 	}
 }
 

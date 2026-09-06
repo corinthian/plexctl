@@ -383,3 +383,60 @@ func TestAuthExactLimitBodySucceeds(t *testing.T) {
 		t.Fatalf("body did not survive: %q", body)
 	}
 }
+
+// TestAuthNonJSONBodyStaysAuthFailed pins contract 2.4's plexctl bullet: the
+// sign-in decode gains strictness and UseNumber through DecodeOne, and the
+// code it reports does not move. A garbage suffix after a valid object is
+// now caught, which json.Unmarshal also caught — the difference the strict
+// decoder makes here is that it catches it for the same reason everywhere
+// else does.
+func TestAuthNonJSONBodyStaysAuthFailed(t *testing.T) {
+	for name, body := range map[string]string{
+		"html":                  "<html>login</html>",
+		"truncated":             `{"user":{"authToken":`,
+		"valid prefix, garbage": `{"user":{"authToken":"t"}} junk`,
+		"two values":            `{"user":{"authToken":"t"}}{"a":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, cliErr := tokenFromSignInBody([]byte(body))
+			if cliErr == nil {
+				t.Fatal("want a CLIError")
+			}
+			if cliErr.Code != output.CodeAuthFailed || cliErr.ExitCode() != 2 {
+				t.Fatalf("code = %q exit %d, want PLEX_AUTH_FAILED exit 2", cliErr.Code, cliErr.ExitCode())
+			}
+			if cliErr.Hint != "check credentials and retry: plexctl auth login" {
+				t.Fatalf("credentials hint lost: %q", cliErr.Hint)
+			}
+		})
+	}
+}
+
+// TestAuthShapeFailuresStayAuthFailed covers the non-decode shape branches,
+// which the same extraction now makes testable.
+func TestAuthShapeFailuresStayAuthFailed(t *testing.T) {
+	for name, body := range map[string]string{
+		"not an object":   `[1,2,3]`,
+		"no user":         `{"a":1}`,
+		"no authToken":    `{"user":{}}`,
+		"token not a str": `{"user":{"authToken":1}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, cliErr := tokenFromSignInBody([]byte(body))
+			if cliErr == nil || cliErr.Code != output.CodeAuthFailed {
+				t.Fatalf("want PLEX_AUTH_FAILED, got %v", cliErr)
+			}
+		})
+	}
+}
+
+// TestAuthTokenSurvivesAValidBody is the success half.
+func TestAuthTokenSurvivesAValidBody(t *testing.T) {
+	tok, cliErr := tokenFromSignInBody([]byte(`{"user":{"authToken":"abc123"}}` + "\n"))
+	if cliErr != nil {
+		t.Fatalf("unexpected error: %v", cliErr)
+	}
+	if tok != "abc123" {
+		t.Fatalf("token = %q, want abc123", tok)
+	}
+}

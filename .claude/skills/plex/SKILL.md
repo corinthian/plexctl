@@ -56,7 +56,7 @@ Two rules:
 | PLEX_CLIENT_UNKNOWN / _INACTIVE / _AMBIGUOUS | Client problem — say which per the message; recovery per hint. |
 | PLEX_CLIENT_UNREACHABLE | Apple TV isn't responding. If Plex is open on it, relaunch the app. Don't retry until the user says it's back. |
 | CLOUD_UNREACHABLE | plex.tv is unreachable — your server is fine; try shortly. |
-| TRANSPORT_TIMEOUT | Plex was slow to answer — retrying may work. (Batches: retry only TIMEOUT items.) |
+| TRANSPORT_TIMEOUT | Plex was slow to answer. The request may already have been applied — say so before retrying anything that changes state. (Batches: retry only TIMEOUT items.) |
 | TRANSPORT_FAILED / PLEX_SERVER_ERROR / PLEX_HTTP_ERROR | Can't reach Plex right now. / Plex errored. |
 | PLEX_QUEUE_CREATE_FAILED | Couldn't create the queue. Nothing added. |
 | PLEX_QUEUE_STAGED | Made the queue, but the Apple TV didn't respond. Once it's awake say "start the queue" — no need to rebuild. (Recovery: `queue-start`, never re-`queue`.) |

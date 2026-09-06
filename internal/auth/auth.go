@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -92,6 +91,37 @@ func readSignInBody(resp *http.Response) ([]byte, *output.CLIError) {
 		return nil, api.Classify(api.OversizeError(http.MethodPost, plexTVSignIn), api.TargetCloud)
 	}
 	return body, nil
+}
+
+// tokenFromSignInBody extracts the auth token from a plex.tv sign-in
+// response. Extracted for the same reason readSignInBody is: Login cannot be
+// driven end to end.
+//
+// The decode is DecodeOne, not json.Unmarshal — strict single-value decoding
+// with UseNumber (contract 2.4, plexctl bullet). The decoder changes; the
+// code does not. A non-JSON body, a body that is not an object, and a body
+// missing user.authToken are all still PLEX_AUTH_FAILED at exit 2 with the
+// credentials hint.
+func tokenFromSignInBody(body []byte) (string, *output.CLIError) {
+	shapeErr := output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint)
+	var payload any
+	if err := xhttp.DecodeOne(body, &payload); err != nil {
+		return "", output.Err(output.CodeAuthFailed,
+			fmt.Sprintf("plex.tv returned non-JSON response: %s", err.Error())).WithHint(authFailedHint)
+	}
+	payloadMap, ok := payload.(map[string]any)
+	if !ok {
+		return "", shapeErr
+	}
+	user, ok := payloadMap["user"].(map[string]any)
+	if !ok {
+		return "", shapeErr
+	}
+	tok, ok := user["authToken"].(string)
+	if !ok {
+		return "", shapeErr
+	}
+	return tok, nil
 }
 
 // mergeConfigPairs overlays the four auth-managed keys onto whatever's
@@ -259,24 +289,9 @@ func Login() {
 		return
 	}
 
-	var payload any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		output.FailErr(output.Err(output.CodeAuthFailed, fmt.Sprintf("plex.tv returned non-JSON response: %s", err.Error())).WithHint(authFailedHint))
-		return
-	}
-	payloadMap, ok := payload.(map[string]any)
-	if !ok {
-		output.FailErr(output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint))
-		return
-	}
-	user, ok := payloadMap["user"].(map[string]any)
-	if !ok {
-		output.FailErr(output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint))
-		return
-	}
-	token, ok := user["authToken"].(string)
-	if !ok {
-		output.FailErr(output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint))
+	token, tokenErr := tokenFromSignInBody(body)
+	if tokenErr != nil {
+		output.FailErr(tokenErr)
 		return
 	}
 
