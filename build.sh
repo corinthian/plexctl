@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # Build the universal macOS binary (arm64 + x86_64) into dist/plexctl.
 #
-# Version resolution, in order:
-#   1. $PLEXCTL_BUILD_VERSION, if set — an explicit stamp always wins.
-#   2. The exact tag on HEAD, if there is one (leading "v" stripped).
-#   3. internal/api/api.go's own default.
+# Version resolution, highest first:
+#   1. The positional argument.
+#   2. $PLEXCTL_BUILD_VERSION, if set — an explicit stamp always wins.
+#   3. The exact tag on HEAD, if there is one (leading "v" stripped).
+#   4. internal/api/api.go's own default.
 #
-# (3) is the one that matters: this script used to hardcode 1.0.3 against
+# (4) is the one that matters: this script used to hardcode 1.0.3 against
 # api.go's 2.0.0-dev, so every released binary reported a version the /plex
 # skill's >= 2.0.0 gate refuses — a skill-level outage produced by the build,
 # not by the code.
 #
-# Set PLEXCTL_RELEASE=1 to make a codesign failure fatal.
+# Runs the same gates CI runs before building. Set PLEXCTL_RELEASE=1 to make
+# a codesign failure fatal.
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p dist
 
-VERSION="${PLEXCTL_BUILD_VERSION:-}"
+VERSION="${1:-}"
+if [ -z "${VERSION}" ]; then
+  VERSION="${PLEXCTL_BUILD_VERSION:-}"
+fi
 if [ -z "${VERSION}" ]; then
   # The one legitimate `|| true` here: a non-git export (or an untagged
   # commit) must not kill the build under `set -e`.
@@ -29,7 +34,42 @@ fi
 if [ -z "${VERSION}" ]; then
   # Fail loudly rather than stamping an empty version: a rename in api.go
   # would otherwise ship a binary that reports nothing.
-  echo "build.sh: could not determine a version — no PLEXCTL_BUILD_VERSION, no exact tag, and no 'var Version = \"...\"' in internal/api/api.go" >&2
+  echo "build.sh: could not determine a version — no positional argument, no PLEXCTL_BUILD_VERSION, no exact tag, and no 'var Version = \"...\"' in internal/api/api.go" >&2
+  exit 1
+fi
+
+GOVULNCHECK="$(command -v govulncheck || true)"
+if [ -z "$GOVULNCHECK" ] && [ -x "$(go env GOPATH)/bin/govulncheck" ]; then
+  GOVULNCHECK="$(go env GOPATH)/bin/govulncheck"
+fi
+if [ -z "$GOVULNCHECK" ]; then
+  echo "[build] govulncheck not found; installing..."
+  go install golang.org/x/vuln/cmd/govulncheck@latest
+  GOVULNCHECK="$(go env GOPATH)/bin/govulncheck"
+fi
+echo "[build] govulncheck ./..."
+"$GOVULNCHECK" ./...
+
+echo "[build] go vet ./..."
+go vet ./...
+
+echo "[build] gofmt -l internal cmd"
+GOFMT_OUT="$(gofmt -l internal cmd)"
+if [ -n "$GOFMT_OUT" ]; then
+  echo "build.sh: gofmt found unformatted files:" >&2
+  echo "$GOFMT_OUT" >&2
+  exit 1
+fi
+
+echo "[build] go test ./..."
+go test ./...
+
+echo "[build] go test -race ./..."
+go test -race ./...
+
+echo "[build] go mod tidy -diff"
+if ! go mod tidy -diff; then
+  echo "build.sh: go mod tidy -diff reports a change; run go mod tidy and commit it" >&2
   exit 1
 fi
 
@@ -49,10 +89,14 @@ if ! codesign -s - -f dist/plexctl; then
 fi
 
 # Prove the stamp landed. Running the artefact is fine here: it is a
-# universal macOS binary on macOS, and --version touches nothing.
+# universal macOS binary on macOS, and --version touches nothing. Exact
+# string equality against the whole --version line, not containment: a
+# prefix match would let "plexctl version 2.0.0-dev" pass for a build that
+# asked for "2.0.0".
 REPORTED="$(dist/plexctl --version)"
-if [[ "${REPORTED}" != *"${VERSION}"* ]]; then
-  echo "build.sh: binary reports '${REPORTED}', expected version '${VERSION}' — the ldflags stamp did not land" >&2
+EXPECTED="plexctl version ${VERSION}"
+if [ "${REPORTED}" != "${EXPECTED}" ]; then
+  echo "build.sh: binary reports '${REPORTED}', expected '${EXPECTED}'" >&2
   exit 1
 fi
 

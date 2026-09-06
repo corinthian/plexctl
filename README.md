@@ -11,7 +11,7 @@ go build -o dist/plexctl ./cmd/plexctl  # single-arch dev build
 
 Requires Go 1.26+. No runtime dependencies.
 
-`build.sh` resolves the version it stamps in this order: `$PLEXCTL_BUILD_VERSION` if set, else the exact git tag on HEAD (leading `v` stripped), else `var Version` in `internal/api/api.go`. If none of the three yields a value it fails rather than stamping an empty version, and after `lipo` it runs `dist/plexctl --version` and fails unless the stamp landed.
+`build.sh` resolves the version it stamps in this order: a positional argument, else `$PLEXCTL_BUILD_VERSION` if set, else the exact git tag on HEAD (leading `v` stripped), else `var Version` in `internal/api/api.go`. If none of the four yields a value it fails rather than stamping an empty version. It also runs the CI gates (`govulncheck`, `go vet`, `gofmt -l`, `go test`, `go test -race`, `go mod tidy -diff`) before building, and after `lipo` it runs `dist/plexctl --version` and fails unless it equals `plexctl version <VERSION>` exactly, not just as a substring.
 
 Codesigning is ad-hoc (`codesign -s -`). A failure warns and continues by default; set `PLEXCTL_RELEASE=1` to make it fatal so a release never ships unsigned.
 
