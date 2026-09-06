@@ -4,6 +4,8 @@
 package commands
 
 import (
+	"errors"
+
 	"github.com/spf13/cobra"
 
 	"github.com/corinthian/plexctl/internal/api"
@@ -75,8 +77,18 @@ in this tree.`,
 // checks) that returns an error instead of calling output directly — all
 // become BAD_REQUEST at exit 1 (v2: exit 64 is dead). Domain failures exit
 // via output.FailErr's coded discipline before cobra ever sees an error.
+//
+// A *output.CLIError returned through a RunE keeps its own code and exit.
+// The catch-all below is now genuinely a catch-all rather than a rewrite: an
+// error that already carries a code was never a usage error, and relabelling
+// it BAD_REQUEST told the caller to fix a command that was fine.
 func Execute() {
 	if err := BuildRoot().Execute(); err != nil {
+		var cli *output.CLIError
+		if errors.As(err, &cli) {
+			output.FailErr(cli)
+			return
+		}
 		output.FailErr(output.Err(output.CodeBadRequest, err.Error()))
 	}
 }

@@ -95,7 +95,7 @@ Keyed to `docs/error_inventory.md`. P2 agents follow this table mechanically; an
 
 - **auth.go** (13 sites): URL validation → `BAD_REQUEST`. Sign-in HTTP >= 400 / response-shape / non-JSON → `PLEX_AUTH_FAILED`. Sign-in transport (`classifyAuthTransport`) → `TRANSPORT_TIMEOUT`/`TRANSPORT_FAILED`/`CLOUD_UNREACHABLE` per class. PMS-verify failures → `TRANSPORT_FAILED` (transport) or `PLEX_AUTH_FAILED` (HTTP >= 400, wrong URL/token). Config write failure → `INTERNAL`.
 - **config.go** (2): both → `PLEX_AUTH_REQUIRED`, exit 5.
-- **root.go `Execute` catch-all** (1): → `BAD_REQUEST`, exit 1 (was `Usage`/64).
+- **root.go `Execute` catch-all** (1): → `BAD_REQUEST`, exit 1 (was `Usage`/64). A `*output.CLIError` returned through a `RunE` is passed through with its own code and exit; the catch-all applies to everything else.
 - **api.go `ExitOnError`** (the chokepoint): classify by `api.Error.Kind` + target + status. `Kind == "timeout"` → `TRANSPORT_TIMEOUT` (PMS) / `PLEX_CLIENT_UNREACHABLE` (`:32500`//player/) — target classification happens HERE, in the binary, ending the skill's URL-sniffing rule. `Kind == "error"` transport → `TRANSPORT_FAILED` / `PLEX_CLIENT_UNREACHABLE` / `CLOUD_UNREACHABLE` (plex.tv base). HTTP statuses: 401/403 → `PLEX_AUTH_REQUIRED`; 404 → `PLEX_NOT_FOUND` (callers with a better meaning — queue-show/add — catch 404 before this layer, as today); 400 → `BAD_REQUEST`; 5xx → `PLEX_SERVER_ERROR`; other → `PLEX_HTTP_ERROR`.
 - **clients.go** (4 inline sites): → `PLEX_CLIENT_AMBIGUOUS`, `PLEX_CLIENT_INACTIVE` (×2), `PLEX_CLIENT_UNKNOWN`.
 - **library.go**: empty-arg Usage sites → `BAD_REQUEST`. `no metadata found` → `PLEX_NOT_FOUND`. `no unwatched episodes` → `PLEX_ALL_WATCHED`. `nothing found for` → `PLEX_NOT_FOUND`.
