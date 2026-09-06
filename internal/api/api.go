@@ -21,6 +21,7 @@ import (
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
+	"github.com/corinthian/plexctl/internal/xduration"
 )
 
 // Version is the X-Plex-Version header value and the CLI version. It's a
@@ -31,62 +32,102 @@ var Version = "2.0.0-dev"
 
 const plexTV = "https://plex.tv"
 
-// DefaultTimeoutSeconds matches api.DEFAULT_TIMEOUT.
-const DefaultTimeoutSeconds = 10.0
+// DefaultTimeout is the timeout used when no source supplies one.
+const DefaultTimeout = 10 * time.Second
 
-var timeoutOverride *float64
+// resolvedTimeout is the per-invocation timeout, resolved once by root's
+// PersistentPreRunE and read by every client constructor. It is a resolved
+// value with no parsing left in it: the grammar is enforced at the boundary,
+// in ResolveTimeout.
+var resolvedTimeout = DefaultTimeout
 
-// SetTimeoutOverride sets the process-wide timeout (the CLI's --timeout flag
-// lands here).
-func SetTimeoutOverride(seconds float64) {
-	timeoutOverride = &seconds
+// timeoutForTest, when set, wins over the resolved value. It has to: root's
+// PersistentPreRunE resolves on every invocation, so a test that forces a
+// sub-second timeout and then runs a command through the root would have it
+// overwritten before the first request.
+var timeoutForTest *time.Duration
+
+// SetTimeout stores the resolved timeout. root's PersistentPreRunE (and
+// seek's own in-RunE resolution, which DisableFlagParsing forces) are the
+// only production callers.
+func SetTimeout(d time.Duration) { resolvedTimeout = d }
+
+// Timeout returns the resolved per-invocation timeout.
+func Timeout() time.Duration {
+	if timeoutForTest != nil {
+		return *timeoutForTest
+	}
+	return resolvedTimeout
 }
 
-// ClearTimeoutOverride mirrors set_timeout_override(None) — tests need it;
-// the CLI never does.
-func ClearTimeoutOverride() {
-	timeoutOverride = nil
-}
+// SetTimeoutForTest forces a timeout directly, bypassing the parser. It is
+// test-only and the CLI never calls it: the user-facing grammar is whole
+// seconds from 1 to 86400, which cannot express the sub-second values tests
+// need to make a request time out quickly.
+func SetTimeoutForTest(d time.Duration) { timeoutForTest = &d }
 
-// DefaultTimeout resolves the per-request timeout:
-// --timeout > $PLEXCTL_TIMEOUT > config `timeout` > 10s.
+// ClearTimeoutForTest restores the default. Test-only, as above.
+func ClearTimeoutForTest() { timeoutForTest = nil }
+
+// ResolveTimeout resolves the timeout from --timeout, $PLEXCTL_TIMEOUT and
+// the config file, in that order, under xduration's integer-seconds grammar.
 //
-// A resolved value <= 0 is never returned — http.Client.Timeout of 0 means
-// no timeout at all, so a non-positive value from any source is treated the
-// same as that source being absent or unparseable. The CLI's --timeout flag
-// is validated at the boundary (root.go) so timeoutOverride should never
-// carry a non-positive value in practice; the check here is the second,
-// unconditional layer for that invariant and for any other caller of
-// SetTimeoutOverride.
-func DefaultTimeout() float64 {
-	if timeoutOverride != nil {
-		if *timeoutOverride > 0 {
-			return *timeoutOverride
-		}
-		return DefaultTimeoutSeconds
+// The flag does not go through xduration.Resolve. Resolve skips a candidate
+// whose value is empty, which is right for an environment variable and a
+// config key — absent means unset — and wrong for a flag: `--timeout ""` is
+// an explicitly supplied empty value, which is a mistake, not an unset
+// source (contract 2.1). So a flag that was Changed is parsed directly and
+// its result is the answer whatever it is.
+//
+// The config candidate is built only when the environment variable is unset.
+// Resolve would otherwise have its argument evaluated eagerly, reading the
+// config file even when $PLEXCTL_TIMEOUT wins — widening the load frequency
+// that contract 2.7 is narrowing.
+func ResolveTimeout(flagSet bool, flagValue string) (time.Duration, error) {
+	if flagSet {
+		return xduration.Parse(flagValue, "--timeout")
 	}
-	if raw := os.Getenv("PLEXCTL_TIMEOUT"); raw != "" {
-		if f, err := strconv.ParseFloat(raw, 64); err == nil && f > 0 {
-			return f
-		}
+	candidates := []xduration.Candidate{{Source: "$PLEXCTL_TIMEOUT", Value: os.Getenv("PLEXCTL_TIMEOUT")}}
+	if candidates[0].Value == "" {
+		candidates = append(candidates, xduration.Candidate{
+			Source: "config timeout (" + config.Path() + ")",
+			Value:  configTimeoutRaw(),
+		})
 	}
-	if raw, ok := config.Load()["timeout"]; ok && jsonx.Truthy(raw) {
-		switch t := raw.(type) {
-		case float64:
-			if t > 0 {
-				return t
-			}
-		case int64:
-			if t > 0 {
-				return float64(t)
-			}
-		case string:
-			if f, err := strconv.ParseFloat(t, 64); err == nil && f > 0 {
-				return f
-			}
-		}
+	return xduration.Resolve(DefaultTimeout, candidates...)
+}
+
+// configTimeoutRaw renders the config file's `timeout` value back to text for
+// the parser. A TOML integer becomes its decimal digits and is accepted; a
+// float, string, bool, array or table renders to something the integer
+// grammar is guaranteed to reject, so one code path produces every rejection
+// message and every rejection names the value the user actually wrote.
+//
+// An absent key renders empty, which xduration.Resolve reads as unset.
+func configTimeoutRaw() string {
+	raw, ok := config.Load()["timeout"]
+	if !ok {
+		return ""
 	}
-	return DefaultTimeoutSeconds
+	switch t := raw.(type) {
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case float64:
+		// A TOML float is a distinct type and is never coerced, so 10.0 must
+		// be rejected exactly as 10.5 is. Keep the point visible.
+		text := strconv.FormatFloat(t, 'g', -1, 64)
+		if !strings.ContainsAny(text, ".eE") {
+			text += ".0"
+		}
+		return text
+	case string:
+		// Quoted, so `timeout = "10"` is rejected and the message shows the
+		// quotes that are the actual mistake. An empty string quotes to `""`,
+		// which is non-empty and so is rejected rather than read as unset.
+		return strconv.Quote(t)
+	default:
+		return fmt.Sprintf("%v", raw)
+	}
 }
 
 // Error mirrors PlexAPIError. Message is JSON-safe; Kind is "timeout" for
@@ -185,15 +226,12 @@ func classifyTransport(err error) *Error {
 }
 
 // Request performs an HTTP call against base+path, mirroring api._request.
-// timeout <= 0 means "use the resolved default". The return is any because
-// plex.tv endpoints return JSON arrays; PMS endpoints return objects.
-func Request(method, base, path string, params url.Values, timeout float64) (any, error) {
+// The return is any because plex.tv endpoints return JSON arrays; PMS
+// endpoints return objects.
+func Request(method, base, path string, params url.Values) (any, error) {
 	cfg := config.Load()
 	token := config.Require("token")
 	clientID := config.StringOr(cfg, "client_id", config.Defaults["client_id"])
-	if timeout <= 0 {
-		timeout = DefaultTimeout()
-	}
 	req, err := http.NewRequest(method, BuildURL(base, path, params), nil)
 	if err != nil {
 		return nil, &Error{Message: "request failed: " + err.Error(), Kind: "error"}
@@ -201,7 +239,7 @@ func Request(method, base, path string, params url.Values, timeout float64) (any
 	for k, v := range Headers(token, clientID) {
 		req.Header.Set(k, v)
 	}
-	client := NewHTTPClient(time.Duration(timeout*float64(time.Second)), nil)
+	client := NewHTTPClient(Timeout(), nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, classifyTransport(err)
@@ -292,7 +330,7 @@ func AsError(err error) *Error {
 // emitting the v2 coded envelope. prefix survives in the human-readable
 // message only; routing rides the code.
 func ExitOnError(method, base, path string, params url.Values, prefix string) any {
-	v, err := Request(method, base, path, params, 0)
+	v, err := Request(method, base, path, params)
 	if err != nil {
 		target := TargetPMS
 		if base == plexTV {
@@ -339,7 +377,7 @@ func PlexTVGet(path string, params url.Values) any {
 // TryGet / TryPut / TryDelete raise instead of print-and-exit, for callers
 // that recover (fallbacks, best-effort deletes, per-item batch tolerance).
 func TryGet(path string, params url.Values) (jsonx.J, error) {
-	v, err := Request("GET", ServerBase(), path, params, 0)
+	v, err := Request("GET", ServerBase(), path, params)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +385,7 @@ func TryGet(path string, params url.Values) (jsonx.J, error) {
 }
 
 func TryPut(path string, params url.Values) (jsonx.J, error) {
-	v, err := Request("PUT", ServerBase(), path, params, 0)
+	v, err := Request("PUT", ServerBase(), path, params)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +393,7 @@ func TryPut(path string, params url.Values) (jsonx.J, error) {
 }
 
 func TryDelete(path string, params url.Values) (jsonx.J, error) {
-	v, err := Request("DELETE", ServerBase(), path, params, 0)
+	v, err := Request("DELETE", ServerBase(), path, params)
 	if err != nil {
 		return nil, err
 	}

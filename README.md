@@ -24,7 +24,8 @@ plexctl auth login
 Writes `~/.config/plexctl/config.toml` (mode 0600) with the server URL, auth token, default client, and a generated client ID. `queue_state.json` lives alongside it in the same directory.
 
 - `$PLEXCTL_CONFIG_DIR` redirects the whole config directory — both `config.toml` and `queue_state.json`.
-- Timeout resolution: `--timeout` > `$PLEXCTL_TIMEOUT` > config `timeout` > 10s.
+- Timeout resolution: `--timeout` > `$PLEXCTL_TIMEOUT` > config `timeout` > 10s. All three take a whole number of seconds, base 10, no sign, no separators and no unit suffix, in the closed range 1 to 86400. `30s`, `10.5` and `1e3` are rejected, nothing is trimmed (`" 30 "` is an error, not 30), and a rejected value is `BAD_REQUEST` at exit 1 naming the source — no source ever falls through silently to the next one or to the default. An empty `$PLEXCTL_TIMEOUT` counts as unset; an empty `--timeout` is an explicit mistake and is rejected.
+- In the config file, `timeout` must be a TOML integer. A file holding `timeout = 10.5`, `timeout = 10.0` or `timeout = "10"` is an error and must be edited to `timeout = 10`.
 - Login preserves any other key already in `config.toml`. If the existing file is unusable (malformed TOML, or unreadable), login moves it aside to `config.toml.corrupt-<timestamp>`, warns on stderr, writes only the four managed keys, and reports the backup path as `configBackup` on the success envelope.
 
 ## Security

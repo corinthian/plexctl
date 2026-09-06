@@ -174,7 +174,7 @@ func companionGet(client jsonx.J, path string, params url.Values) (*http.Respons
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	httpClient := api.NewHTTPClient(time.Duration(api.DefaultTimeout()*float64(time.Second)), nil)
+	httpClient := api.NewHTTPClient(api.Timeout(), nil)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, nil, err

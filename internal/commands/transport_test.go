@@ -3,6 +3,7 @@ package commands_test
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/commands"
@@ -34,7 +35,7 @@ func TestSeekTimeoutFlagAppliesOverrideInsteadOfJoiningPosition(t *testing.T) {
 	f := newFakePMS(t)
 	f.resolvableClient(t)
 	playingSession(f, 90000, "playing")
-	t.Cleanup(func() { api.ClearTimeoutOverride() })
+	t.Cleanup(func() { api.ClearTimeoutForTest() })
 
 	f.on("GET", "/player/playback/seekTo", func(r *http.Request) (int, any) {
 		return 200, map[string]any{}
@@ -56,8 +57,8 @@ func TestSeekTimeoutFlagAppliesOverrideInsteadOfJoiningPosition(t *testing.T) {
 	if got["playState"] != "playing" {
 		t.Fatalf("playState = %v, want playing (out=%s)", got["playState"], out)
 	}
-	if gotTimeout := api.DefaultTimeout(); gotTimeout != 5 {
-		t.Fatalf("timeout override = %v, want 5", gotTimeout)
+	if gotTimeout := api.Timeout(); gotTimeout != 5*time.Second {
+		t.Fatalf("resolved timeout = %v, want 5s", gotTimeout)
 	}
 }
 
@@ -66,7 +67,7 @@ func TestSeekTimeoutFlagEqualsForm(t *testing.T) {
 	f := newFakePMS(t)
 	f.resolvableClient(t)
 	playingSession(f, 90000, "playing")
-	t.Cleanup(func() { api.ClearTimeoutOverride() })
+	t.Cleanup(func() { api.ClearTimeoutForTest() })
 
 	f.on("GET", "/player/playback/seekTo", func(r *http.Request) (int, any) {
 		return 200, map[string]any{}
@@ -82,8 +83,8 @@ func TestSeekTimeoutFlagEqualsForm(t *testing.T) {
 	if got["ok"] != true {
 		t.Fatalf("expected ok:true, got %#v (out=%s)", got, out)
 	}
-	if gotTimeout := api.DefaultTimeout(); gotTimeout != 5 {
-		t.Fatalf("timeout override = %v, want 5", gotTimeout)
+	if gotTimeout := api.Timeout(); gotTimeout != 5*time.Second {
+		t.Fatalf("resolved timeout = %v, want 5s", gotTimeout)
 	}
 }
 
@@ -93,7 +94,7 @@ func TestSeekTimeoutFlagEqualsForm(t *testing.T) {
 // being marked Changed here.
 func TestSeekTimeoutFlagNonPositiveIsUsageError(t *testing.T) {
 	_ = newFakePMS(t)
-	t.Cleanup(func() { api.ClearTimeoutOverride() })
+	t.Cleanup(func() { api.ClearTimeoutForTest() })
 
 	root := commands.BuildRoot()
 	root.SetArgs([]string{"seek", "1:30", "--timeout", "0"})
@@ -247,7 +248,7 @@ func TestRootTimeoutFlagBeforeSeekAppliesOverride(t *testing.T) {
 	f := newFakePMS(t)
 	f.resolvableClient(t)
 	playingSession(f, 90000, "playing")
-	t.Cleanup(func() { api.ClearTimeoutOverride() })
+	t.Cleanup(func() { api.ClearTimeoutForTest() })
 
 	f.on("GET", "/player/playback/seekTo", func(r *http.Request) (int, any) {
 		return 200, map[string]any{}
@@ -263,8 +264,8 @@ func TestRootTimeoutFlagBeforeSeekAppliesOverride(t *testing.T) {
 	if got["ok"] != true {
 		t.Fatalf("expected ok:true, got %#v (out=%s)", got, out)
 	}
-	if gotTimeout := api.DefaultTimeout(); gotTimeout != 5 {
-		t.Fatalf("timeout override = %v, want 5", gotTimeout)
+	if gotTimeout := api.Timeout(); gotTimeout != 5*time.Second {
+		t.Fatalf("resolved timeout = %v, want 5s", gotTimeout)
 	}
 }
 

@@ -4,15 +4,13 @@
 package commands
 
 import (
-	"fmt"
-
 	"github.com/spf13/cobra"
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/output"
 )
 
-var timeoutFlag float64
+var timeoutFlag string
 
 var registrars []func(*cobra.Command)
 
@@ -46,20 +44,25 @@ in this tree.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Root().PersistentFlags().Changed("timeout") {
-				// A non-positive override is not "no timeout" — it makes
-				// http.Client.Timeout 0, which is Go for no timeout at all.
-				// Reject at the boundary rather than let it reach DefaultTimeout.
-				if timeoutFlag <= 0 {
-					return fmt.Errorf("invalid value for '--timeout': %v is not greater than 0", timeoutFlag)
-				}
-				api.SetTimeoutOverride(timeoutFlag)
+			// Resolved once, here, for every command. Any rejection —
+			// whatever the source — is a BAD_REQUEST at exit 1: plexctl's
+			// closed map has no config family, and routing a numeric typo
+			// through PLEX_AUTH_REQUIRED would tell the user to run
+			// auth login (contract 2.7, plexctl exception).
+			d, err := api.ResolveTimeout(cmd.Root().PersistentFlags().Changed("timeout"), timeoutFlag)
+			if err != nil {
+				return err
 			}
+			api.SetTimeout(d)
 			return nil
 		},
 	}
-	root.PersistentFlags().Float64Var(&timeoutFlag, "timeout", 0,
-		"HTTP timeout in seconds (overrides $PLEXCTL_TIMEOUT and config `timeout`; default 10)")
+	// A StringVar, not an IntVar: cobra's own parse error for an int flag
+	// would replace the source-named message contract 2.1 requires, and
+	// `--timeout ""` would be rejected by an accident of cobra's parsing
+	// rather than by the grammar.
+	root.PersistentFlags().StringVar(&timeoutFlag, "timeout", "",
+		"HTTP timeout, whole seconds 1-86400 (overrides $PLEXCTL_TIMEOUT and config `timeout`; default 10)")
 	for _, f := range registrars {
 		f(root)
 	}

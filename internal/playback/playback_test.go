@@ -365,8 +365,8 @@ func TestTimeoutClassification(t *testing.T) {
 	}))
 	t.Cleanup(slow.Close)
 	testutil.Setup(t, "http://pms.test:32400")
-	api.SetTimeoutOverride(0.05)
-	t.Cleanup(api.ClearTimeoutOverride)
+	api.SetTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(api.ClearTimeoutForTest)
 
 	_, cliErr := Play(fakeClient(slow.URL))
 	if cliErr == nil {

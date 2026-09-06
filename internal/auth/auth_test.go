@@ -4,10 +4,13 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
+	"github.com/corinthian/plexctl/internal/testutil"
 )
 
 // TestMergeConfigPairsPreservesHandAddedKey pins W5: auth login used to
@@ -243,4 +246,42 @@ func TestQuarantineCorruptConfig(t *testing.T) {
 			t.Fatalf("config.toml must be left intact when it cannot be moved aside: %v", err)
 		}
 	})
+}
+
+// TestAuthLoginTimeoutsAreNotOverridable pins contract 2.1's exceptions row.
+// Login reads stdin and posts to a const plex.tv URL, so it cannot be driven
+// end to end; what it can be held to is that its three deadlines are fixed
+// values that no resolved timeout reaches, and that the clients it builds
+// carry them. A resolution that returns 1s while the sign-in client still
+// reports 15s is the whole assertion.
+func TestAuthLoginTimeoutsAreNotOverridable(t *testing.T) {
+	testutil.Setup(t, "http://unused")
+	t.Setenv("PLEXCTL_TIMEOUT", "1")
+
+	resolved, err := api.ResolveTimeout(false, "")
+	if err != nil {
+		t.Fatalf("resolving $PLEXCTL_TIMEOUT=1: %v", err)
+	}
+	if resolved != time.Second {
+		t.Fatalf("resolved timeout = %v, want 1s — the premise of this test", resolved)
+	}
+
+	if signInTimeout != 15*time.Second {
+		t.Errorf("sign-in timeout = %v, want a fixed 15s", signInTimeout)
+	}
+	if signInDialTimeout != 14*time.Second {
+		t.Errorf("sign-in dial timeout = %v, want a fixed 14s", signInDialTimeout)
+	}
+	if signInDialTimeout >= signInTimeout {
+		t.Errorf("dial timeout %v must stay under the overall %v", signInDialTimeout, signInTimeout)
+	}
+	if verifyTimeout != 10*time.Second {
+		t.Errorf("verify timeout = %v, want a fixed 10s", verifyTimeout)
+	}
+	if c := api.NewHTTPClient(signInTimeout, nil); c.Timeout != 15*time.Second {
+		t.Errorf("sign-in client timeout = %v, want 15s", c.Timeout)
+	}
+	if c := api.NewHTTPClient(verifyTimeout, nil); c.Timeout != 10*time.Second {
+		t.Errorf("verify client timeout = %v, want 10s", c.Timeout)
+	}
 }

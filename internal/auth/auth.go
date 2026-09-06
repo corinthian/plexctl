@@ -27,6 +27,19 @@ import (
 
 const plexTVSignIn = "https://plex.tv/users/sign_in.json"
 
+// Sign-in and verify timeouts are fixed and are not overridable by
+// --timeout, $PLEXCTL_TIMEOUT or config `timeout` (contract 2.1,
+// exceptions row). auth login runs before there is a usable config, and its
+// dial timeout is deliberately just under the overall deadline so a connect
+// stall classifies as a dial error rather than racing Client.Timeout. Named
+// constants rather than literals so a later reader cannot swap one for
+// api.Timeout() without the test noticing.
+const (
+	signInTimeout     = 15 * time.Second
+	signInDialTimeout = 14 * time.Second
+	verifyTimeout     = 10 * time.Second
+)
+
 // loadOrQuarantineConfig is login's one config read, extracted as a seam:
 // Login itself reads stdin and posts to a const plex.tv URL, so it can't be
 // tested end-to-end, but this can.
@@ -202,8 +215,8 @@ func Login() {
 	// reliably classifies as a dial error ("connection failed", matching
 	// requests.ConnectTimeout ⊂ ConnectionError) rather than racing the
 	// phase-blind Client.Timeout.
-	client := api.NewHTTPClient(15*time.Second, &http.Transport{
-		DialContext: (&net.Dialer{Timeout: 14 * time.Second}).DialContext,
+	client := api.NewHTTPClient(signInTimeout, &http.Transport{
+		DialContext: (&net.Dialer{Timeout: signInDialTimeout}).DialContext,
 	})
 	resp, err := client.Do(req)
 	if err != nil {
@@ -256,7 +269,7 @@ func Login() {
 		verifyReq.Header.Set(k, v)
 	}
 	verifyReq.Header.Set("X-Plex-Token", token)
-	verifyClient := api.NewHTTPClient(10*time.Second, nil)
+	verifyClient := api.NewHTTPClient(verifyTimeout, nil)
 	verifyResp, err := verifyClient.Do(verifyReq)
 	if err != nil {
 		output.FailErr(api.Classify(api.AsError(err), api.TargetPMS))

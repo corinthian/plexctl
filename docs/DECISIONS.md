@@ -17,3 +17,13 @@ This is a deliberate divergence from v1/cli.py parity, and the only behaviour it
 A response body over plexctl's bound reports `DECODE_ERROR` at exit 4 with a message naming the bound, rather than a `RESPONSE_TOO_LARGE` of its own. Contract 2.5 fixed the new-code set at `TRANSPORT_FAILED` and `DECODE_ERROR`, and every additional public code is another row the deployed plex skill does not map — its code table is closed and has no catch-all.
 
 The `cause.Cause` stays distinct: `Oversize` and `Decode` are separate values, so tests and hints can tell a body that was too big from one that was malformed. The CLI code does not need the distinction, because the recovery is the same for both: report it, do not retry. A decode failure is deterministic and a body that exceeded the bound will exceed it again.
+
+## A rejected timeout is `BAD_REQUEST` at exit 1, not `PLEX_AUTH_REQUIRED` — 2026-09-06
+
+Timeout values now come from one parser under one grammar (whole seconds, 1 to 86400) across `--timeout`, `$PLEXCTL_TIMEOUT` and the config file's `timeout` key, and a rejected value from any of the three is `BAD_REQUEST` at exit 1.
+
+arrctl and traktctl route the environment and config sources to their config family, `BAD_CONFIG`. plexctl has no config family: its closed map sends every config failure through `PLEX_AUTH_REQUIRED` at exit 5, whose hint is `run: plexctl auth login`. Telling someone to sign in again because they typed `timeout = 10.5` is worse than useless, and splitting one error across two exit classes by source would be worse still. Exit 1 also matches what arrctl and traktctl return for the same input.
+
+Config failures that genuinely are auth failures — a missing token, an unreadable file, unparseable TOML — keep `PLEX_AUTH_REQUIRED` at exit 5, unchanged.
+
+The resolved value is a process-scoped `time.Duration` in `internal/api`, set once by root's `PersistentPreRunE`. It is a resolved value with no parsing left in it; phase C3a-2 moves it onto a per-invocation `App`, and C3b is where an injected seam would go if one is ever wanted.
