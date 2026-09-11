@@ -253,8 +253,8 @@ func TestQueueBindTimeoutStagesQueueWithClientUnreachable(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 		return 200, nil
 	})
-	api.SetTimeoutOverride(0.05)
-	t.Cleanup(api.ClearTimeoutOverride)
+	api.SetTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(api.ClearTimeoutForTest)
 
 	root := commands.BuildRoot()
 	root.SetArgs([]string{"queue", "123"})
@@ -344,8 +344,8 @@ func TestQueueBindFailurePreservesExistingEntryNoStaged(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 		return 200, nil
 	})
-	api.SetTimeoutOverride(0.05)
-	t.Cleanup(api.ClearTimeoutOverride)
+	api.SetTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(api.ClearTimeoutForTest)
 
 	root := commands.BuildRoot()
 	root.SetArgs([]string{"queue", "123"})
@@ -385,8 +385,8 @@ func TestQueueBindFailureStagesWhenNoEntryEmitsStagedKey(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 		return 200, nil
 	})
-	api.SetTimeoutOverride(0.05)
-	t.Cleanup(api.ClearTimeoutOverride)
+	api.SetTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(api.ClearTimeoutForTest)
 
 	root := commands.BuildRoot()
 	root.SetArgs([]string{"queue", "123"})

@@ -1104,8 +1104,8 @@ func TestAddToClientVerifyGETTimeoutReturnsAddedInsteadOfExiting(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 		return 200, nil
 	})
-	api.SetTimeoutOverride(0.05)
-	t.Cleanup(api.ClearTimeoutOverride)
+	api.SetTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(api.ClearTimeoutForTest)
 
 	result, cliErr := AddToClient(appleTV(), []string{"100", "101"})
 

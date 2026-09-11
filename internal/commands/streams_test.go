@@ -498,3 +498,118 @@ func TestBulkSetAudioPartialFailureIsHTTPErrorWithResults(t *testing.T) {
 		t.Fatalf("results statuses = %#v, want 1 ok + 1 error", statuses)
 	}
 }
+
+// TestBulkSetAudioDryRunSucceedsWithZeroWrites is the E20 gap: every existing
+// dry-run test either rejects the flag outright (single-item mode) or never
+// registers a PUT handler, so a bulk dry-run that plans real work and then
+// mistakenly executed it would still show ok:true with no server to catch
+// the write. Here both parts' PUT handlers are live — if bulkSetAudio's
+// dryRun branch ever fell through to streams.ExecuteBulkAudio, countMethod
+// would see it. plexctl has no filesystem or queue-state surface behind
+// set-audio (bulkSetAudio touches only the PMS client), so the filesystem
+// half of "dry-run counts both network and state writes" is n/a here; the
+// network half is the load-bearing assertion.
+func TestBulkSetAudioDryRunSucceedsWithZeroWrites(t *testing.T) {
+	f := newFakePMS(t)
+	f.onJSON("GET", "/hubs/search", showHubResponse("1", "Show"))
+	f.onJSON("GET", "/library/metadata/1/allLeaves", map[string]any{
+		"MediaContainer": map[string]any{
+			"Metadata": []any{
+				map[string]any{"ratingKey": "10", "parentIndex": 1.0, "index": 1.0, "title": "S1E1"},
+				map[string]any{"ratingKey": "11", "parentIndex": 1.0, "index": 2.0, "title": "S1E2"},
+			},
+		},
+	})
+	f.onJSON("GET", "/library/metadata/10,11", map[string]any{
+		"MediaContainer": map[string]any{
+			"Metadata": []any{
+				map[string]any{"ratingKey": "10", "Media": []any{
+					map[string]any{"Part": []any{
+						map[string]any{"id": 500.0, "Stream": []any{
+							map[string]any{"id": 2.0, "streamType": 2.0, "languageCode": "eng", "language": "English"},
+						}},
+					}},
+				}},
+				map[string]any{"ratingKey": "11", "Media": []any{
+					map[string]any{"Part": []any{
+						map[string]any{"id": 501.0, "Stream": []any{
+							map[string]any{"id": 3.0, "streamType": 2.0, "languageCode": "eng", "language": "English"},
+						}},
+					}},
+				}},
+			},
+		},
+	})
+	// Both PUTs would succeed if reached — a silent no-op here would let a
+	// regression pass, which is why they must be live rather than absent.
+	f.onStatus("PUT", "/library/parts/500", 200)
+	f.onStatus("PUT", "/library/parts/501", 200)
+
+	root := commands.BuildRoot()
+	root.SetArgs([]string{"set-audio", "--show", "Show", "--language", "eng", "--dry-run"})
+	out, _ := testutil.Capture(t, func() { _ = root.Execute() })
+	if n := f.countMethod("PUT"); n != 0 {
+		t.Fatalf("PUT count = %d, want 0 (dry-run must never reach ExecuteBulkAudio)", n)
+	}
+	got := mustUnmarshal(t, out)
+	if got["ok"] != true {
+		t.Fatalf("got %#v, want ok:true", got)
+	}
+	if got["dryRun"] != true {
+		t.Fatalf("dryRun = %#v, want true", got["dryRun"])
+	}
+	if toApply, _ := got["toApply"].(float64); toApply != 2 {
+		t.Fatalf("toApply = %#v, want 2", got["toApply"])
+	}
+}
+
+// TestSetAudioSingleDryRunRejectedNoWrite pins the item-1 fix: the four
+// bulk-only flags (--dry-run, --season, --all-seasons, --only-non-eng) are
+// rejected in single-item mode BEFORE any HTTP, mirroring the bulk branch's
+// existing "--stream-id is single-item only" rejection. --dry-run in
+// particular used to be accepted and ignored, so `set-audio 123 --dry-run`
+// performed the PUT it claimed to be planning. Asserting only the error code
+// would pass a build that writes first and errors afterwards, so the PUT
+// count is the load-bearing assertion.
+func TestSetAudioSingleDryRunRejectedNoWrite(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"dry-run", []string{"set-audio", "123", "--dry-run"}, "--dry-run is bulk-only; not valid with RATING_KEY"},
+		{"season", []string{"set-audio", "123", "--season", "2"}, "--season is bulk-only; not valid with RATING_KEY"},
+		{"all-seasons", []string{"set-audio", "123", "--all-seasons"}, "--all-seasons is bulk-only; not valid with RATING_KEY"},
+		{"only-non-eng", []string{"set-audio", "123", "--only-non-eng"}, "--only-non-eng is bulk-only; not valid with RATING_KEY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakePMS(t)
+			f.onJSON("GET", "/library/metadata/123", map[string]any{
+				"MediaContainer": map[string]any{"Metadata": []any{map[string]any{
+					"ratingKey": "123",
+					"Media": []any{map[string]any{"Part": []any{map[string]any{
+						"id":     456,
+						"Stream": []any{map[string]any{"id": 789, "streamType": 2, "languageCode": "eng"}},
+					}}}},
+				}}},
+			})
+			f.onJSON("PUT", "/library/parts/456", map[string]any{})
+
+			root := commands.BuildRoot()
+			root.SetArgs(tc.args)
+			out, code := testutil.Capture(t, func() { _ = root.Execute() })
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1; out=%s", code, out)
+			}
+			if n := f.countMethod("PUT"); n != 0 {
+				t.Fatalf("PUT count = %d, want 0 (validation must precede the write)", n)
+			}
+			got := mustUnmarshal(t, out)
+			body := errBody(t, got)
+			if got["ok"] != false || body["code"] != "BAD_REQUEST" || body["message"] != tc.want {
+				t.Fatalf("got %#v, want BAD_REQUEST %q", got, tc.want)
+			}
+		})
+	}
+}

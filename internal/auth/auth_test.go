@@ -1,22 +1,33 @@
 package auth
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
+	"github.com/corinthian/plexctl/internal/testutil"
 )
 
 // TestMergeConfigPairsPreservesHandAddedKey pins W5: auth login used to
 // Save only its own four keys, silently destroying any other key the
-// config already had — the README-documented `timeout` included.
+// config already had — the README-documented `timeout` included. The
+// preserved value also keeps its TOML type now that config.Save encodes
+// rather than quotes: `timeout = 10` stays an integer instead of being
+// rewritten as "10".
 func TestMergeConfigPairsPreservesHandAddedKey(t *testing.T) {
 	existing := jsonx.J{"timeout": int64(10)}
 	pairs := mergeConfigPairs(existing, "http://pms:32400", "tok", "Apple TV", "cid-1")
 
 	want := []config.KV{
-		{K: "timeout", V: "10"},
+		{K: "timeout", V: int64(10)},
 		{K: "server_url", V: "http://pms:32400"},
 		{K: "token", V: "tok"},
 		{K: "default_client", V: "Apple TV"},
@@ -100,5 +111,332 @@ func TestValidatePMSURL(t *testing.T) {
 				t.Fatalf("validatePMSURL(%q) = %v, want no error", raw, err)
 			}
 		})
+	}
+}
+
+// TestLoadOrQuarantineCleanConfig covers the two non-destructive paths of
+// login's single config read: a readable file hands its keys back untouched
+// with no backup, and an absent file (first-ever login) is an empty map,
+// not an error.
+func TestLoadOrQuarantineCleanConfig(t *testing.T) {
+	t.Run("readable file", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+		if err := os.WriteFile(config.Path(), []byte("timeout = 10\ntoken = \"old\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		existing, backup, cliErr := loadOrQuarantineConfig()
+		if cliErr != nil {
+			t.Fatalf("cliErr = %#v, want nil", cliErr)
+		}
+		if backup != "" {
+			t.Fatalf("backup = %q, want empty (nothing was quarantined)", backup)
+		}
+		if existing["timeout"] != int64(10) || existing["token"] != "old" {
+			t.Fatalf("existing = %#v", existing)
+		}
+		if _, err := os.Stat(config.Path()); err != nil {
+			t.Fatalf("config.toml must survive a clean read: %v", err)
+		}
+	})
+
+	t.Run("absent file", func(t *testing.T) {
+		t.Setenv("PLEXCTL_CONFIG_DIR", t.TempDir())
+		existing, backup, cliErr := loadOrQuarantineConfig()
+		if cliErr != nil || backup != "" || len(existing) != 0 {
+			t.Fatalf("existing=%#v backup=%q cliErr=%#v, want empty/empty/nil", existing, backup, cliErr)
+		}
+	})
+}
+
+// TestQuarantineCorruptConfig pins the destructive path. An unusable config
+// can't have its unmanaged keys preserved through the rename-over save, so
+// login makes the loss explicit instead of silent: the original bytes move
+// to config.toml.corrupt-<RFC3339> and login continues with an empty map.
+// "Unusable" covers a non-ENOENT read failure as well as a parse failure —
+// TryLoad used to report a permissions error as a clean absent file, which
+// is what let the save destroy a perfectly good config nobody could read.
+func TestQuarantineCorruptConfig(t *testing.T) {
+	readBackup := func(t *testing.T, backup string) string {
+		t.Helper()
+		if backup == "" {
+			t.Fatal("backup path is empty, want the quarantined file")
+		}
+		if _, err := os.Stat(config.Path()); !os.IsNotExist(err) {
+			t.Fatalf("config.toml still present after quarantine: err=%v", err)
+		}
+		if err := os.Chmod(backup, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(backup)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	t.Run("malformed TOML", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+		const original = "not = = toml\n"
+		if err := os.WriteFile(config.Path(), []byte(original), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		existing, backup, cliErr := loadOrQuarantineConfig()
+		if cliErr != nil {
+			t.Fatalf("cliErr = %#v, want nil (login must repair, not abort)", cliErr)
+		}
+		if len(existing) != 0 {
+			t.Fatalf("existing = %#v, want an empty map", existing)
+		}
+		if got := readBackup(t, backup); got != original {
+			t.Fatalf("backup holds %q, want the original bytes %q", got, original)
+		}
+	})
+
+	t.Run("unreadable file", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores file modes")
+		}
+		dir := t.TempDir()
+		t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+		const original = "token = \"still-good\"\n"
+		if err := os.WriteFile(config.Path(), []byte(original), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(config.Path(), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		existing, backup, cliErr := loadOrQuarantineConfig()
+		if cliErr != nil {
+			t.Fatalf("cliErr = %#v, want nil", cliErr)
+		}
+		if len(existing) != 0 {
+			t.Fatalf("existing = %#v, want an empty map", existing)
+		}
+		if got := readBackup(t, backup); got != original {
+			t.Fatalf("backup holds %q, want the original bytes %q", got, original)
+		}
+	})
+
+	t.Run("rename failure is INTERNAL, not destruction", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory modes")
+		}
+		dir := t.TempDir()
+		t.Setenv("PLEXCTL_CONFIG_DIR", dir)
+		if err := os.WriteFile(config.Path(), []byte("not = = toml\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// A read-execute directory still allows reading the file but not
+		// creating the backup name in it.
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+		_, backup, cliErr := loadOrQuarantineConfig()
+		if cliErr == nil {
+			t.Fatal("cliErr = nil, want INTERNAL rather than proceeding with the file left behind")
+		}
+		if cliErr.Code != output.CodeInternal || cliErr.ExitCode() != 4 {
+			t.Fatalf("code=%q exit=%d, want %q/4", cliErr.Code, cliErr.ExitCode(), output.CodeInternal)
+		}
+		if backup != "" {
+			t.Fatalf("backup = %q, want empty on failure", backup)
+		}
+		if _, err := os.Stat(config.Path()); err != nil {
+			t.Fatalf("config.toml must be left intact when it cannot be moved aside: %v", err)
+		}
+	})
+}
+
+// TestAuthLoginTimeoutsAreNotOverridable pins contract 2.1's exceptions row.
+// Login reads stdin and posts to a const plex.tv URL, so it cannot be driven
+// end to end; what it can be held to is that its three deadlines are fixed
+// values that no resolved timeout reaches, and that the clients it builds
+// carry them. A resolution that returns 1s while the sign-in client still
+// reports 15s is the whole assertion.
+func TestAuthLoginTimeoutsAreNotOverridable(t *testing.T) {
+	testutil.Setup(t, "http://unused")
+	t.Setenv("PLEXCTL_TIMEOUT", "1")
+
+	resolved, err := api.ResolveTimeout(false, "")
+	if err != nil {
+		t.Fatalf("resolving $PLEXCTL_TIMEOUT=1: %v", err)
+	}
+	if resolved != time.Second {
+		t.Fatalf("resolved timeout = %v, want 1s — the premise of this test", resolved)
+	}
+
+	if signInTimeout != 15*time.Second {
+		t.Errorf("sign-in timeout = %v, want a fixed 15s", signInTimeout)
+	}
+	if signInDialTimeout != 14*time.Second {
+		t.Errorf("sign-in dial timeout = %v, want a fixed 14s", signInDialTimeout)
+	}
+	if signInDialTimeout >= signInTimeout {
+		t.Errorf("dial timeout %v must stay under the overall %v", signInDialTimeout, signInTimeout)
+	}
+	if verifyTimeout != 10*time.Second {
+		t.Errorf("verify timeout = %v, want a fixed 10s", verifyTimeout)
+	}
+	if c := api.NewHTTPClient(signInTimeout, nil); c.Timeout != 15*time.Second {
+		t.Errorf("sign-in client timeout = %v, want 15s", c.Timeout)
+	}
+	if c := api.NewHTTPClient(verifyTimeout, nil); c.Timeout != 10*time.Second {
+		t.Errorf("verify client timeout = %v, want 10s", c.Timeout)
+	}
+}
+
+// TestAuthOversizeBodyIsDecodeError pins contract 2.3 on the sign-in leg:
+// the 32 MiB silent truncation is gone, and an oversize body is DECODE_ERROR
+// at exit 4 naming the bound — not the CLOUD_UNREACHABLE "retry shortly"
+// advice that a deterministic failure cannot act on.
+func TestAuthOversizeBodyIsDecodeError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 64 MiB body")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 1<<20)
+		remaining := api.BodyLimit + 1
+		for remaining > 0 {
+			n := int64(len(buf))
+			if remaining < n {
+				n = remaining
+			}
+			w.Write(buf[:n])
+			remaining -= n
+		}
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, cliErr := readSignInBody(resp)
+	if cliErr == nil {
+		t.Fatalf("want a CLIError, got body of %d bytes", len(body))
+	}
+	if cliErr.Code != output.CodeDecodeError || cliErr.ExitCode() != 4 {
+		t.Fatalf("code = %q exit %d, want DECODE_ERROR exit 4", cliErr.Code, cliErr.ExitCode())
+	}
+	if cliErr.Hint != "" {
+		t.Fatalf("DECODE_ERROR must carry no hint, got %q", cliErr.Hint)
+	}
+	if !strings.Contains(cliErr.Message, "64 MiB") {
+		t.Fatalf("message does not name the bound: %q", cliErr.Message)
+	}
+}
+
+// TestAuthOversizeOn401KeepsAuthFailed is the ordering half: the status is
+// classified before the read failure.
+func TestAuthOversizeOn401KeepsAuthFailed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 64 MiB body")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		buf := make([]byte, 1<<20)
+		remaining := api.BodyLimit + 1
+		for remaining > 0 {
+			n := int64(len(buf))
+			if remaining < n {
+				n = remaining
+			}
+			w.Write(buf[:n])
+			remaining -= n
+		}
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, cliErr := readSignInBody(resp)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeAuthFailed || cliErr.ExitCode() != 2 {
+		t.Fatalf("code = %q exit %d, want PLEX_AUTH_FAILED exit 2", cliErr.Code, cliErr.ExitCode())
+	}
+}
+
+// TestAuthExactLimitBodySucceeds pins the boundary on this leg too.
+func TestAuthExactLimitBodySucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"user":{"authToken":"t"}}`))
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, cliErr := readSignInBody(resp)
+	if cliErr != nil {
+		t.Fatalf("unexpected error: %v", cliErr)
+	}
+	if !strings.Contains(string(body), "authToken") {
+		t.Fatalf("body did not survive: %q", body)
+	}
+}
+
+// TestAuthNonJSONBodyStaysAuthFailed pins contract 2.4's plexctl bullet: the
+// sign-in decode gains strictness and UseNumber through DecodeOne, and the
+// code it reports does not move. A garbage suffix after a valid object is
+// now caught, which json.Unmarshal also caught — the difference the strict
+// decoder makes here is that it catches it for the same reason everywhere
+// else does.
+func TestAuthNonJSONBodyStaysAuthFailed(t *testing.T) {
+	for name, body := range map[string]string{
+		"html":                  "<html>login</html>",
+		"truncated":             `{"user":{"authToken":`,
+		"valid prefix, garbage": `{"user":{"authToken":"t"}} junk`,
+		"two values":            `{"user":{"authToken":"t"}}{"a":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, cliErr := tokenFromSignInBody([]byte(body))
+			if cliErr == nil {
+				t.Fatal("want a CLIError")
+			}
+			if cliErr.Code != output.CodeAuthFailed || cliErr.ExitCode() != 2 {
+				t.Fatalf("code = %q exit %d, want PLEX_AUTH_FAILED exit 2", cliErr.Code, cliErr.ExitCode())
+			}
+			if cliErr.Hint != "check credentials and retry: plexctl auth login" {
+				t.Fatalf("credentials hint lost: %q", cliErr.Hint)
+			}
+		})
+	}
+}
+
+// TestAuthShapeFailuresStayAuthFailed covers the non-decode shape branches,
+// which the same extraction now makes testable.
+func TestAuthShapeFailuresStayAuthFailed(t *testing.T) {
+	for name, body := range map[string]string{
+		"not an object":   `[1,2,3]`,
+		"no user":         `{"a":1}`,
+		"no authToken":    `{"user":{}}`,
+		"token not a str": `{"user":{"authToken":1}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, cliErr := tokenFromSignInBody([]byte(body))
+			if cliErr == nil || cliErr.Code != output.CodeAuthFailed {
+				t.Fatalf("want PLEX_AUTH_FAILED, got %v", cliErr)
+			}
+		})
+	}
+}
+
+// TestAuthTokenSurvivesAValidBody is the success half.
+func TestAuthTokenSurvivesAValidBody(t *testing.T) {
+	tok, cliErr := tokenFromSignInBody([]byte(`{"user":{"authToken":"abc123"}}` + "\n"))
+	if cliErr != nil {
+		t.Fatalf("unexpected error: %v", cliErr)
+	}
+	if tok != "abc123" {
+		t.Fatalf("token = %q, want abc123", tok)
 	}
 }

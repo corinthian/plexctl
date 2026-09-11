@@ -8,85 +8,61 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/corinthian/plexctl/internal/app"
+	"github.com/corinthian/plexctl/internal/cause"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
+	"github.com/corinthian/plexctl/internal/xhttp"
 )
 
 // Version is the X-Plex-Version header value and the CLI version. It's a
 // var, not a const, so build.sh can inject the real value via
 // -ldflags -X — a const can't be overridden that way. This default is
 // what an unadorned `go build` (dev builds, tests) reports.
-var Version = "2.0.0-dev"
+var Version = "2.0.1"
 
 const plexTV = "https://plex.tv"
 
-// DefaultTimeoutSeconds matches api.DEFAULT_TIMEOUT.
-const DefaultTimeoutSeconds = 10.0
+// DefaultTimeout is the timeout used when no source supplies one. The
+// resolution itself lives on the invocation's App (internal/app): it is
+// per-invocation state, lazily resolved and memoised there alongside the
+// config it may have to read. These are the thin forwarders the CLI, seek and
+// the grammar's tests call.
+const DefaultTimeout = app.DefaultTimeout
 
-var timeoutOverride *float64
+// SetTimeout stores the resolved timeout on this invocation's App.
+func SetTimeout(d time.Duration) { app.Current().SetTimeout(d) }
 
-// SetTimeoutOverride sets the process-wide timeout (the CLI's --timeout flag
-// lands here).
-func SetTimeoutOverride(seconds float64) {
-	timeoutOverride = &seconds
+// Timeout returns this invocation's timeout, resolving it at most once.
+func Timeout() time.Duration { return app.Current().Timeout() }
+
+// SetTimeoutForTest forces a timeout directly, bypassing the parser. It is
+// test-only and the CLI never calls it: the user-facing grammar is whole
+// seconds from 1 to 86400, which cannot express the sub-second values tests
+// need to make a request time out quickly. The override is sticky — it
+// outlives root installing a fresh App on the next invocation.
+func SetTimeoutForTest(d time.Duration) { app.SetTimeoutForTest(d) }
+
+// ClearTimeoutForTest restores normal resolution. Test-only, as above.
+func ClearTimeoutForTest() { app.ClearTimeoutForTest() }
+
+// ResolveTimeoutEager resolves the flag and the environment, the two sources
+// that cost nothing to read. ok is false when neither is present.
+func ResolveTimeoutEager(flagSet bool, flagValue string) (time.Duration, bool, error) {
+	return app.ResolveTimeoutEager(flagSet, flagValue)
 }
 
-// ClearTimeoutOverride mirrors set_timeout_override(None) — tests need it;
-// the CLI never does.
-func ClearTimeoutOverride() {
-	timeoutOverride = nil
-}
-
-// DefaultTimeout resolves the per-request timeout:
-// --timeout > $PLEXCTL_TIMEOUT > config `timeout` > 10s.
-//
-// A resolved value <= 0 is never returned — http.Client.Timeout of 0 means
-// no timeout at all, so a non-positive value from any source is treated the
-// same as that source being absent or unparseable. The CLI's --timeout flag
-// is validated at the boundary (root.go) so timeoutOverride should never
-// carry a non-positive value in practice; the check here is the second,
-// unconditional layer for that invariant and for any other caller of
-// SetTimeoutOverride.
-func DefaultTimeout() float64 {
-	if timeoutOverride != nil {
-		if *timeoutOverride > 0 {
-			return *timeoutOverride
-		}
-		return DefaultTimeoutSeconds
-	}
-	if raw := os.Getenv("PLEXCTL_TIMEOUT"); raw != "" {
-		if f, err := strconv.ParseFloat(raw, 64); err == nil && f > 0 {
-			return f
-		}
-	}
-	if raw, ok := config.Load()["timeout"]; ok && jsonx.Truthy(raw) {
-		switch t := raw.(type) {
-		case float64:
-			if t > 0 {
-				return t
-			}
-		case int64:
-			if t > 0 {
-				return float64(t)
-			}
-		case string:
-			if f, err := strconv.ParseFloat(t, 64); err == nil && f > 0 {
-				return f
-			}
-		}
-	}
-	return DefaultTimeoutSeconds
+// ResolveTimeout resolves the whole ladder against the current App's config.
+func ResolveTimeout(flagSet bool, flagValue string) (time.Duration, error) {
+	return app.ResolveTimeout(flagSet, flagValue)
 }
 
 // Error mirrors PlexAPIError. Message is JSON-safe; Kind is "timeout" for
@@ -99,9 +75,42 @@ type Error struct {
 	Message string
 	Kind    string
 	Status  int
+	// cause is set only where this package knows the classification better
+	// than any inspection of an underlying error could: an oversize body and
+	// a strict-decode failure. It is returned verbatim by Cause(), with no
+	// fallback to sniffing — xhttp.Classify consults cause.Coded first and
+	// stops there, which is exactly what keeps a part-way read failure a
+	// transport failure rather than letting its unexpected-EOF text be read
+	// as a decode error.
+	cause cause.Cause
 }
 
 func (e *Error) Error() string { return e.Message }
+
+// Cause satisfies cause.Coded.
+func (e *Error) Cause() cause.Cause { return e.cause }
+
+// BodyLimit bounds every response body plexctl reads. It is a library
+// constant, not a user setting: no flag, no environment variable, no config
+// key (contract 2.3). A body over it is never truncated and never decoded —
+// a partial body is worse than no body, because it can parse.
+//
+// Sized per contract 2.3: four times the largest observed response or 64 MiB,
+// whichever is greater. Measured 2026-09-06 on the wire against the live PMS:
+// full movie section 392,194 bytes; full episode listing (type=4) 5,850,651
+// bytes. Four times the larger is about 23 MiB, so the 64 MiB floor applies.
+const BodyLimit int64 = 64 << 20
+
+// OversizeError is the one *Error for a body over BodyLimit. The message
+// names the bound and the request; it never carries the query string,
+// because path is the request path as plexctl built it.
+func OversizeError(method, path string) *Error {
+	return &Error{
+		Message: fmt.Sprintf("response body from %s %s exceeds the %d MiB bound", method, path, BodyLimit>>20),
+		Kind:    "error",
+		cause:   cause.Oversize,
+	}
+}
 
 // Headers returns the standard Plex header set. X-Plex-Provides: controller
 // is required on every PMS request or /clients returns an empty list.
@@ -119,7 +128,7 @@ func Headers(token, clientID string) map[string]string {
 
 // ServerBase is the configured PMS base URL.
 func ServerBase() string {
-	return config.StringOr(config.Load(), "server_url", config.Defaults["server_url"])
+	return config.StringOr(app.Current().Config(), "server_url", config.Defaults["server_url"])
 }
 
 // BuildURL joins base+path and appends params. path may already carry a
@@ -142,16 +151,15 @@ func BuildURL(base, path string, params url.Values) string {
 // Cookie-class headers cross-origin). CheckRedirect fires BEFORE the
 // redirect request is sent, so refusing here means no header ever leaves.
 func NewHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
-	c := &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return fmt.Errorf("redirect refused: destination %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
-		},
-	}
-	if transport != nil {
-		c.Transport = transport
-	}
-	return c
+	// The wrapper keeps its name and signature and delegates. Every
+	// http.Client in plexctl still comes from one constructor, which is the
+	// property contract 2.2 protects, and the four call sites are unchanged.
+	// No hop cap is added: reject-all makes a redirect loop unreachable.
+	return xhttp.NewClient(xhttp.Options{
+		Timeout:   timeout,
+		Redirects: xhttp.RedirectPolicy{RejectAll: true},
+		Transport: transport,
+	})
 }
 
 // SanitizeError renders err without query strings, userinfo, or fragments.
@@ -185,15 +193,12 @@ func classifyTransport(err error) *Error {
 }
 
 // Request performs an HTTP call against base+path, mirroring api._request.
-// timeout <= 0 means "use the resolved default". The return is any because
-// plex.tv endpoints return JSON arrays; PMS endpoints return objects.
-func Request(method, base, path string, params url.Values, timeout float64) (any, error) {
-	cfg := config.Load()
-	token := config.Require("token")
+// The return is any because plex.tv endpoints return JSON arrays; PMS
+// endpoints return objects.
+func Request(method, base, path string, params url.Values) (any, error) {
+	cfg := app.Current().Config()
+	token := app.Current().Require("token")
 	clientID := config.StringOr(cfg, "client_id", config.Defaults["client_id"])
-	if timeout <= 0 {
-		timeout = DefaultTimeout()
-	}
 	req, err := http.NewRequest(method, BuildURL(base, path, params), nil)
 	if err != nil {
 		return nil, &Error{Message: "request failed: " + err.Error(), Kind: "error"}
@@ -201,33 +206,42 @@ func Request(method, base, path string, params url.Values, timeout float64) (any
 	for k, v := range Headers(token, clientID) {
 		req.Header.Set(k, v)
 	}
-	client := NewHTTPClient(time.Duration(timeout*float64(time.Second)), nil)
+	client := NewHTTPClient(Timeout(), nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, classifyTransport(err)
 	}
-	defer resp.Body.Close()
-	// PMS library responses are legitimately large; 32 MiB just yields a
-	// JSON parse error downstream on truncation, not a sentinel to handle.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil {
-		return nil, classifyTransport(err)
+	// ReadBody closes the body on every path, oversize and I/O failure
+	// included, so there is no defer here.
+	body, readErr := xhttp.ReadBody(resp, BodyLimit)
+	oversize := errors.Is(readErr, xhttp.ErrOversize)
+	if readErr != nil && !oversize {
+		// A read that fails part-way is a genuine transport failure and
+		// keeps its target code; only oversize and decode move to
+		// DECODE_ERROR.
+		return nil, classifyTransport(readErr)
 	}
+	// The status is classified first: an oversize body never converts a 4xx
+	// or a 5xx into a decode error (contract 2.3). body is nil in that case,
+	// so FormatHTTPError falls back to the reason phrase.
 	if resp.StatusCode >= 400 {
 		reason := http.StatusText(resp.StatusCode)
 		return nil, &Error{Message: FormatHTTPError(resp.StatusCode, resp.Header.Get("Content-Type"), string(body), reason), Kind: "error", Status: resp.StatusCode}
 	}
+	if oversize {
+		return nil, OversizeError(method, path)
+	}
 	if strings.TrimSpace(string(body)) == "" {
 		return jsonx.J{}, nil
 	}
-	// UseNumber keeps PMS number literals verbatim through the pass-through
-	// paths (9.0 stays 9.0, like Python's json round-trip), instead of
-	// float64's shortest-form re-rendering.
-	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.UseNumber()
+	// DecodeOne requires exactly one JSON value: a valid prefix followed by
+	// anything but whitespace is a decode error, whether or not it parses.
+	// It sets UseNumber itself, so PMS number literals still survive
+	// verbatim through the pass-through paths (9.0 stays 9.0, like Python's
+	// json round-trip) instead of being re-rendered through float64.
 	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, &Error{Message: "invalid JSON response: " + err.Error(), Kind: "error"}
+	if err := xhttp.DecodeOne(body, &v); err != nil {
+		return nil, &Error{Message: "invalid JSON response: " + err.Error(), Kind: "error", cause: cause.Decode}
 	}
 	return v, nil
 }
@@ -248,6 +262,16 @@ const (
 // docs/error_model_v2.md §3: transport errors code by target, HTTP statuses
 // by class. The chokepoint for every coded failure that starts as HTTP.
 func Classify(e *Error, target Target) *output.CLIError {
+	// The cause is tested before the target switch. xhttp.Classify consults
+	// cause.Coded first, so an *Error that knows its own cause is
+	// authoritative and no message sniffing is involved. A decode or
+	// oversize failure is DECODE_ERROR whatever the leg it came from, and it
+	// carries no hint: "retry shortly" and "wake the device" are advice that
+	// cannot help here (contract 2.5, plexctl's target asymmetry).
+	switch xhttp.Classify(e) {
+	case cause.Oversize, cause.Decode:
+		return output.Err(output.CodeDecodeError, e.Message)
+	}
 	if e.Status == 0 {
 		switch target {
 		case TargetCloud:
@@ -259,7 +283,7 @@ func Classify(e *Error, target Target) *output.CLIError {
 		default:
 			if e.Kind == "timeout" {
 				return output.Err(output.CodeTransportTimeout, e.Message).
-					WithHint("retry — on batches, retry only timed-out items")
+					WithHint("retry — the request may already have been applied; on batches, retry only timed-out items")
 			}
 			return output.Err(output.CodeTransportFailed, e.Message)
 		}
@@ -292,7 +316,7 @@ func AsError(err error) *Error {
 // emitting the v2 coded envelope. prefix survives in the human-readable
 // message only; routing rides the code.
 func ExitOnError(method, base, path string, params url.Values, prefix string) any {
-	v, err := Request(method, base, path, params, 0)
+	v, err := Request(method, base, path, params)
 	if err != nil {
 		target := TargetPMS
 		if base == plexTV {
@@ -339,7 +363,7 @@ func PlexTVGet(path string, params url.Values) any {
 // TryGet / TryPut / TryDelete raise instead of print-and-exit, for callers
 // that recover (fallbacks, best-effort deletes, per-item batch tolerance).
 func TryGet(path string, params url.Values) (jsonx.J, error) {
-	v, err := Request("GET", ServerBase(), path, params, 0)
+	v, err := Request("GET", ServerBase(), path, params)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +371,7 @@ func TryGet(path string, params url.Values) (jsonx.J, error) {
 }
 
 func TryPut(path string, params url.Values) (jsonx.J, error) {
-	v, err := Request("PUT", ServerBase(), path, params, 0)
+	v, err := Request("PUT", ServerBase(), path, params)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +379,7 @@ func TryPut(path string, params url.Values) (jsonx.J, error) {
 }
 
 func TryDelete(path string, params url.Values) (jsonx.J, error) {
-	v, err := Request("DELETE", ServerBase(), path, params, 0)
+	v, err := Request("DELETE", ServerBase(), path, params)
 	if err != nil {
 		return nil, err
 	}

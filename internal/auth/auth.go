@@ -6,9 +6,8 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,19 +22,115 @@ import (
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
+	"github.com/corinthian/plexctl/internal/xhttp"
 )
 
 const plexTVSignIn = "https://plex.tv/users/sign_in.json"
+
+// Sign-in and verify timeouts are fixed and are not overridable by
+// --timeout, $PLEXCTL_TIMEOUT or config `timeout` (contract 2.1,
+// exceptions row). auth login runs before there is a usable config, and its
+// dial timeout is deliberately just under the overall deadline so a connect
+// stall classifies as a dial error rather than racing Client.Timeout. Named
+// constants rather than literals so a later reader cannot swap one for
+// api.Timeout() without the test noticing.
+const (
+	signInTimeout     = 15 * time.Second
+	signInDialTimeout = 14 * time.Second
+	verifyTimeout     = 10 * time.Second
+)
+
+// loadOrQuarantineConfig is login's one config read, extracted as a seam:
+// Login itself reads stdin and posts to a const plex.tv URL, so it can't be
+// tested end-to-end, but this can.
+//
+// A usable config comes back as-is with no backup. An unusable one — bad
+// TOML, or a non-ENOENT read failure — cannot have its unmanaged keys
+// carried through the rename-over save, so the loss is made explicit rather
+// than silent: the original bytes move to config.toml.corrupt-<RFC3339>,
+// the caller warns naming that path, and login continues with an empty map,
+// writing only the four managed keys. If the file cannot be moved aside,
+// that is INTERNAL (exit 4) — never destroy what could not be backed up.
+func loadOrQuarantineConfig() (jsonx.J, string, *output.CLIError) {
+	existing, loadErr := config.TryLoad()
+	if loadErr == nil {
+		return existing, "", nil
+	}
+	backup := config.Path() + ".corrupt-" + time.Now().UTC().Format(time.RFC3339)
+	if err := os.Rename(config.Path(), backup); err != nil {
+		return nil, "", output.Err(output.CodeInternal,
+			fmt.Sprintf("config at %s is unusable (%v) and could not be moved aside: %v", config.Path(), loadErr, err))
+	}
+	return jsonx.J{}, backup, nil
+}
+
+const authFailedHint = "check credentials and retry: plexctl auth login"
+
+// readSignInBody performs the bounded read of a plex.tv sign-in response and
+// the triage that follows it. Extracted as a seam for the same reason
+// loadOrQuarantineConfig is: Login reads stdin and posts to a const plex.tv
+// URL, so it cannot be driven end to end, and this can.
+//
+// The order is fixed by contract 2.3: a part-way read failure is a genuine
+// transport failure and keeps the cloud target's code; the HTTP status is
+// classified next, so an oversize body never converts a 4xx or 5xx into a
+// decode error; only then is oversize itself reported, as DECODE_ERROR at
+// exit 4 with the bound named.
+func readSignInBody(resp *http.Response) ([]byte, *output.CLIError) {
+	// ReadBody closes the body on every path, so there is no defer here.
+	body, readErr := xhttp.ReadBody(resp, api.BodyLimit)
+	oversize := errors.Is(readErr, xhttp.ErrOversize)
+	if readErr != nil && !oversize {
+		return nil, api.Classify(api.AsError(readErr), api.TargetCloud)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, output.Err(output.CodeAuthFailed,
+			fmt.Sprintf("auth failed: HTTP %d", resp.StatusCode)).WithHint(authFailedHint)
+	}
+	if oversize {
+		return nil, api.Classify(api.OversizeError(http.MethodPost, plexTVSignIn), api.TargetCloud)
+	}
+	return body, nil
+}
+
+// tokenFromSignInBody extracts the auth token from a plex.tv sign-in
+// response. Extracted for the same reason readSignInBody is: Login cannot be
+// driven end to end.
+//
+// The decode is DecodeOne, not json.Unmarshal — strict single-value decoding
+// with UseNumber (contract 2.4, plexctl bullet). The decoder changes; the
+// code does not. A non-JSON body, a body that is not an object, and a body
+// missing user.authToken are all still PLEX_AUTH_FAILED at exit 2 with the
+// credentials hint.
+func tokenFromSignInBody(body []byte) (string, *output.CLIError) {
+	shapeErr := output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint)
+	var payload any
+	if err := xhttp.DecodeOne(body, &payload); err != nil {
+		return "", output.Err(output.CodeAuthFailed,
+			fmt.Sprintf("plex.tv returned non-JSON response: %s", err.Error())).WithHint(authFailedHint)
+	}
+	payloadMap, ok := payload.(map[string]any)
+	if !ok {
+		return "", shapeErr
+	}
+	user, ok := payloadMap["user"].(map[string]any)
+	if !ok {
+		return "", shapeErr
+	}
+	tok, ok := user["authToken"].(string)
+	if !ok {
+		return "", shapeErr
+	}
+	return tok, nil
+}
 
 // mergeConfigPairs overlays the four auth-managed keys onto whatever's
 // already in existing (a corrupt or missing config's TryLoad result — see
 // its own doc comment on why login must tolerate rather than abort on
 // that). Every other key existing already had — the README-documented
-// `timeout` included — survives untouched. TOML round-trips every value as
-// a quoted string (config.Save always double-quotes), so a numeric
-// `timeout = 10` survives as `timeout = "10"`; DefaultTimeout already
-// parses strings, so this is tolerated rather than fixed here — preserving
-// TOML types would mean widening KV beyond string, out of scope for this.
+// `timeout` included — survives untouched, and with its TOML type intact:
+// config.Save now encodes values rather than quoting them, so a numeric
+// `timeout = 10` stays an integer instead of coming back as "10".
 func mergeConfigPairs(existing jsonx.J, serverURL, token, defaultClient, clientID string) []config.KV {
 	managed := map[string]bool{"server_url": true, "token": true, "default_client": true, "client_id": true}
 	extraKeys := make([]string, 0, len(existing))
@@ -47,7 +142,7 @@ func mergeConfigPairs(existing jsonx.J, serverURL, token, defaultClient, clientI
 	sort.Strings(extraKeys) // existing is a map: iteration order isn't stable without this
 	pairs := make([]config.KV, 0, len(extraKeys)+4)
 	for _, k := range extraKeys {
-		pairs = append(pairs, config.KV{K: k, V: jsonx.AsStr(existing[k])})
+		pairs = append(pairs, config.KV{K: k, V: existing[k]})
 	}
 	return append(pairs,
 		config.KV{K: "server_url", V: serverURL},
@@ -99,6 +194,20 @@ func readPassword(reader *bufio.Reader) string {
 
 // Login mirrors auth.login (interactive; prints JSON result or error+exit).
 func Login() {
+	// The one config read, up front. It used to be a config.Load() midway
+	// through the prompts (below the password), so a corrupt config made
+	// login collect a password and then abort on the very file it exists to
+	// repair. Reading here also means the merge site downstream reuses this
+	// map instead of re-reading the file.
+	existing, configBackup, cliErr := loadOrQuarantineConfig()
+	if cliErr != nil {
+		output.FailErr(cliErr)
+		return
+	}
+	if configBackup != "" {
+		fmt.Fprintf(os.Stderr, "Warning: config at %s was unusable and has been moved to %s — only the auth-managed keys will be written; recover anything else from the backup.\n", config.Path(), configBackup)
+	}
+
 	fmt.Println("Plex.tv credentials (never stored — only the token is saved)")
 
 	reader := bufio.NewReader(os.Stdin)
@@ -133,7 +242,7 @@ func Login() {
 	}
 
 	var clientID string
-	if v, ok := config.Load()["client_id"]; ok && jsonx.Truthy(v) {
+	if v, ok := existing["client_id"]; ok && jsonx.Truthy(v) {
 		clientID = jsonx.AsStr(v)
 	} else {
 		clientID = "plexctl-" + randomClientIDSuffix()
@@ -166,47 +275,23 @@ func Login() {
 	// reliably classifies as a dial error ("connection failed", matching
 	// requests.ConnectTimeout ⊂ ConnectionError) rather than racing the
 	// phase-blind Client.Timeout.
-	client := api.NewHTTPClient(15*time.Second, &http.Transport{
-		DialContext: (&net.Dialer{Timeout: 14 * time.Second}).DialContext,
+	client := api.NewHTTPClient(signInTimeout, &http.Transport{
+		DialContext: (&net.Dialer{Timeout: signInDialTimeout}).DialContext,
 	})
 	resp, err := client.Do(req)
 	if err != nil {
 		output.FailErr(api.Classify(api.AsError(err), api.TargetCloud))
 		return
 	}
-	defer resp.Body.Close()
-	// plex.tv sign-in responses are small; the 32 MiB cap just matches the
-	// PMS/Companion bounded reads, and truncation would surface as a JSON
-	// parse error downstream, not a sentinel to handle.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil {
-		output.FailErr(api.Classify(api.AsError(err), api.TargetCloud))
-		return
-	}
-	const authFailedHint = "check credentials and retry: plexctl auth login"
-	if resp.StatusCode >= 400 {
-		output.FailErr(output.Err(output.CodeAuthFailed, fmt.Sprintf("auth failed: HTTP %d", resp.StatusCode)).WithHint(authFailedHint))
+	body, signInErr := readSignInBody(resp)
+	if signInErr != nil {
+		output.FailErr(signInErr)
 		return
 	}
 
-	var payload any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		output.FailErr(output.Err(output.CodeAuthFailed, fmt.Sprintf("plex.tv returned non-JSON response: %s", err.Error())).WithHint(authFailedHint))
-		return
-	}
-	payloadMap, ok := payload.(map[string]any)
-	if !ok {
-		output.FailErr(output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint))
-		return
-	}
-	user, ok := payloadMap["user"].(map[string]any)
-	if !ok {
-		output.FailErr(output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint))
-		return
-	}
-	token, ok := user["authToken"].(string)
-	if !ok {
-		output.FailErr(output.Err(output.CodeAuthFailed, "unexpected auth response shape from plex.tv").WithHint(authFailedHint))
+	token, tokenErr := tokenFromSignInBody(body)
+	if tokenErr != nil {
+		output.FailErr(tokenErr)
 		return
 	}
 
@@ -220,7 +305,7 @@ func Login() {
 		verifyReq.Header.Set(k, v)
 	}
 	verifyReq.Header.Set("X-Plex-Token", token)
-	verifyClient := api.NewHTTPClient(10*time.Second, nil)
+	verifyClient := api.NewHTTPClient(verifyTimeout, nil)
 	verifyResp, err := verifyClient.Do(verifyReq)
 	if err != nil {
 		output.FailErr(api.Classify(api.AsError(err), api.TargetPMS))
@@ -242,8 +327,10 @@ func Login() {
 	// four keys to config.py's write_text-of-only-that-dict) rather than a
 	// port regression — but it silently destroyed any other hand-added key
 	// (the README-documented `timeout` included). mergeConfigPairs merges
-	// onto whatever's already there instead of overwriting it.
-	existing, _ := config.TryLoad()
+	// onto whatever's already there instead of overwriting it — `existing`
+	// being the map loadOrQuarantineConfig read at the top of Login (empty
+	// when the old file was quarantined, in which case there is nothing left
+	// to preserve).
 	pairs := mergeConfigPairs(existing, serverURL, token, defaultClient, clientID)
 
 	// Python's cfg.save() propagates filesystem errors (traceback, exit 1);
@@ -254,5 +341,11 @@ func Login() {
 		return
 	}
 
-	output.Print(jsonx.J{"ok": true, "message": fmt.Sprintf("token saved to %s", config.Path())})
+	result := jsonx.J{"ok": true, "message": fmt.Sprintf("token saved to %s", config.Path())}
+	// Additive, and present only when a config was actually moved aside, so
+	// a caller that never hits the corrupt path sees the v1 envelope.
+	if configBackup != "" {
+		result["configBackup"] = configBackup
+	}
+	output.PrintOrFail(result)
 }

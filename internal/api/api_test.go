@@ -5,12 +5,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/corinthian/plexctl/internal/api"
 	"github.com/corinthian/plexctl/internal/jsonx"
+	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/testutil"
 )
 
@@ -110,8 +113,8 @@ func TestTimeoutClassifiesAndExitsThree(t *testing.T) {
 	}))
 	defer srv.Close()
 	testutil.Setup(t, srv.URL)
-	api.SetTimeoutOverride(0.05)
-	t.Cleanup(func() { api.ClearTimeoutOverride() })
+	api.SetTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(func() { api.ClearTimeoutForTest() })
 
 	out, code := testutil.Capture(t, func() { api.Get("/slow", nil) })
 	if code != 3 {
@@ -124,8 +127,8 @@ func TestTimeoutClassifiesAndExitsThree(t *testing.T) {
 
 func TestConnectionRefusedClassifies(t *testing.T) {
 	testutil.Setup(t, "http://127.0.0.1:1") // nothing listens on port 1
-	api.SetTimeoutOverride(2)
-	t.Cleanup(func() { api.ClearTimeoutOverride() })
+	api.SetTimeoutForTest(2 * time.Second)
+	t.Cleanup(func() { api.ClearTimeoutForTest() })
 	_, err := api.TryGet("/x", nil)
 	if err == nil {
 		t.Fatal("want error")
@@ -139,6 +142,9 @@ func TestConnectionRefusedClassifies(t *testing.T) {
 	}
 }
 
+// TestInvalidJSONClassifies: the message is unchanged, but the code and exit
+// move from TRANSPORT_FAILED 3 to DECODE_ERROR 4 (contract Part 3, plexctl
+// decode rows). A malformed body is not a transport failure and never was.
 func TestInvalidJSONClassifies(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("<xml>not json</xml>"))
@@ -148,6 +154,10 @@ func TestInvalidJSONClassifies(t *testing.T) {
 	_, err := api.TryGet("/x", nil)
 	if err == nil || !strings.HasPrefix(err.Error(), "invalid JSON response:") {
 		t.Fatalf("want invalid JSON classification, got %v", err)
+	}
+	cli := api.Classify(api.AsError(err), api.TargetPMS)
+	if cli.Code != output.CodeDecodeError || cli.ExitCode() != 4 {
+		t.Fatalf("code = %q exit %d, want DECODE_ERROR exit 4", cli.Code, cli.ExitCode())
 	}
 }
 
@@ -187,56 +197,180 @@ func TestBuildURLPathWithEmbeddedQuery(t *testing.T) {
 	}
 }
 
+// TestDefaultTimeoutResolution was an assertion that PLEXCTL_TIMEOUT=3.5
+// resolves to 3.5 seconds. Under the integer-seconds grammar (contract 2.1)
+// a float from any source is an error, so the float case inverts and the
+// ordering it was really testing keeps its own integer case.
 func TestDefaultTimeoutResolution(t *testing.T) {
-	dir := testutil.Setup(t, "http://unused")
-	_ = dir
-	t.Setenv("PLEXCTL_TIMEOUT", "3.5")
-	if got := api.DefaultTimeout(); got != 3.5 {
-		t.Fatalf("env timeout = %v, want 3.5", got)
-	}
-	api.SetTimeoutOverride(1.25)
-	t.Cleanup(func() { api.ClearTimeoutOverride() })
-	if got := api.DefaultTimeout(); got != 1.25 {
-		t.Fatalf("override should win, got %v", got)
+	testutil.Setup(t, "http://unused")
+
+	t.Run("a float from the environment is rejected", func(t *testing.T) {
+		t.Setenv("PLEXCTL_TIMEOUT", "3.5")
+		if _, err := api.ResolveTimeout(false, ""); err == nil {
+			t.Fatal("PLEXCTL_TIMEOUT=3.5 resolved without error")
+		}
+	})
+
+	t.Run("the environment is used when the flag is unset", func(t *testing.T) {
+		t.Setenv("PLEXCTL_TIMEOUT", "3")
+		got, err := api.ResolveTimeout(false, "")
+		if err != nil || got != 3*time.Second {
+			t.Fatalf("env timeout = %v, %v; want 3s", got, err)
+		}
+	})
+
+	t.Run("the flag outranks the environment", func(t *testing.T) {
+		t.Setenv("PLEXCTL_TIMEOUT", "3")
+		got, err := api.ResolveTimeout(true, "1")
+		if err != nil || got != time.Second {
+			t.Fatalf("flag timeout = %v, %v; want 1s", got, err)
+		}
+	})
+
+	t.Run("nothing set resolves to the default", func(t *testing.T) {
+		t.Setenv("PLEXCTL_TIMEOUT", "")
+		got, err := api.ResolveTimeout(false, "")
+		if err != nil || got != api.DefaultTimeout {
+			t.Fatalf("default timeout = %v, %v; want %v", got, err, api.DefaultTimeout)
+		}
+	})
+}
+
+// TestNonPositiveAndMalformedTimeoutsAreRejected inverts what was
+// TestDefaultTimeoutClampsNonPositive. The silent fall-through to the
+// default is exactly what contract 2.1 abolishes: no source ever rescues an
+// invalid higher-priority one, and nothing is skipped quietly.
+func TestNonPositiveAndMalformedTimeoutsAreRejected(t *testing.T) {
+	testutil.Setup(t, "http://unused")
+
+	for _, raw := range []string{"0", "abc", "-1"} {
+		t.Run("env "+raw, func(t *testing.T) {
+			t.Setenv("PLEXCTL_TIMEOUT", raw)
+			_, err := api.ResolveTimeout(false, "")
+			if err == nil {
+				t.Fatalf("PLEXCTL_TIMEOUT=%s resolved without error", raw)
+			}
+			if !strings.Contains(err.Error(), "$PLEXCTL_TIMEOUT") {
+				t.Fatalf("error does not name the source: %v", err)
+			}
+		})
 	}
 }
 
-// TestDefaultTimeoutClampsNonPositive pins W1: a non-positive or
-// unparseable value from any source is never returned as-is — it would
-// make http.Client.Timeout 0, which is Go for no timeout at all — so it
-// falls through exactly like an absent/unparseable source would.
-func TestDefaultTimeoutClampsNonPositive(t *testing.T) {
+// TestEnvTimeoutInvalidIsBadRequest covers the environment surface of
+// contract 2.1's edge-case table, including the one value that is not an
+// error: an empty variable counts as unset and the next candidate is
+// consulted.
+func TestEnvTimeoutInvalidIsBadRequest(t *testing.T) {
 	testutil.Setup(t, "http://unused")
 
-	t.Run("env zero falls through to default", func(t *testing.T) {
-		t.Setenv("PLEXCTL_TIMEOUT", "0")
-		if got := api.DefaultTimeout(); got != api.DefaultTimeoutSeconds {
-			t.Fatalf("PLEXCTL_TIMEOUT=0 resolved to %v, want %v", got, api.DefaultTimeoutSeconds)
+	for _, raw := range []string{"abc", "0", "-1", "10.5", "90000", "30s", " 30 ", "+30", "NaN", "Inf"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("PLEXCTL_TIMEOUT", raw)
+			_, err := api.ResolveTimeout(false, "")
+			if err == nil {
+				t.Fatalf("PLEXCTL_TIMEOUT=%q resolved without error", raw)
+			}
+			if !strings.Contains(err.Error(), "$PLEXCTL_TIMEOUT") {
+				t.Fatalf("error does not name $PLEXCTL_TIMEOUT: %v", err)
+			}
+		})
+	}
+
+	t.Run("empty is unset, not an error", func(t *testing.T) {
+		t.Setenv("PLEXCTL_TIMEOUT", "")
+		got, err := api.ResolveTimeout(false, "")
+		if err != nil {
+			t.Fatalf("empty PLEXCTL_TIMEOUT errored: %v", err)
+		}
+		if got != api.DefaultTimeout {
+			t.Fatalf("empty PLEXCTL_TIMEOUT resolved to %v, want the default %v", got, api.DefaultTimeout)
+		}
+	})
+}
+
+// writeConfigTimeout rewrites the test config with a raw TOML timeout line,
+// so each case exercises the real type the TOML decoder produces.
+func writeConfigTimeout(t *testing.T, dir, line string) {
+	t.Helper()
+	body := "server_url = \"http://unused\"\ntoken = \"test-token\"\n" + line + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConfigTimeoutTypeRules pins contract 2.1's TOML rows: an integer is the
+// only accepted form in a config file, and every other type is an error
+// naming the file, never a silent fall-through to the default.
+func TestConfigTimeoutTypeRules(t *testing.T) {
+	t.Setenv("PLEXCTL_TIMEOUT", "")
+
+	t.Run("integer is accepted", func(t *testing.T) {
+		dir := testutil.Setup(t, "http://unused")
+		writeConfigTimeout(t, dir, "timeout = 10")
+		got, err := api.ResolveTimeout(false, "")
+		if err != nil || got != 10*time.Second {
+			t.Fatalf("config timeout = %v, %v; want 10s", got, err)
 		}
 	})
 
-	t.Run("env unparseable falls through to default", func(t *testing.T) {
-		t.Setenv("PLEXCTL_TIMEOUT", "abc")
-		if got := api.DefaultTimeout(); got != api.DefaultTimeoutSeconds {
-			t.Fatalf("PLEXCTL_TIMEOUT=abc resolved to %v, want %v", got, api.DefaultTimeoutSeconds)
-		}
-	})
+	for _, line := range []string{
+		"timeout = 10.5",
+		"timeout = 10.0",
+		"timeout = \"10\"",
+		"timeout = \"10s\"",
+		"timeout = 0",
+		"timeout = -1",
+		"timeout = 90000",
+		"timeout = true",
+		"timeout = [10]",
+	} {
+		t.Run(line, func(t *testing.T) {
+			dir := testutil.Setup(t, "http://unused")
+			writeConfigTimeout(t, dir, line)
+			_, err := api.ResolveTimeout(false, "")
+			if err == nil {
+				t.Fatalf("%s resolved without error", line)
+			}
+			if !strings.Contains(err.Error(), "config timeout (") {
+				t.Fatalf("error does not name the config source: %v", err)
+			}
+		})
+	}
 
-	t.Run("override zero falls through to default (defensive resolver clamp)", func(t *testing.T) {
-		api.SetTimeoutOverride(0)
-		t.Cleanup(func() { api.ClearTimeoutOverride() })
-		if got := api.DefaultTimeout(); got != api.DefaultTimeoutSeconds {
-			t.Fatalf("override=0 resolved to %v, want %v", got, api.DefaultTimeoutSeconds)
+	t.Run("absent is unset, not an error", func(t *testing.T) {
+		testutil.Setup(t, "http://unused")
+		got, err := api.ResolveTimeout(false, "")
+		if err != nil || got != api.DefaultTimeout {
+			t.Fatalf("absent config timeout = %v, %v; want the default", got, err)
 		}
 	})
+}
 
-	t.Run("override negative falls through to default", func(t *testing.T) {
-		api.SetTimeoutOverride(-1)
-		t.Cleanup(func() { api.ClearTimeoutOverride() })
-		if got := api.DefaultTimeout(); got != api.DefaultTimeoutSeconds {
-			t.Fatalf("override=-1 resolved to %v, want %v", got, api.DefaultTimeoutSeconds)
-		}
-	})
+// TestInvalidFlagBeatsValidConfig pins the no-rescue rule: the highest
+// present source is authoritative even when it is wrong, and a valid lower
+// source never repairs it.
+func TestInvalidFlagBeatsValidConfig(t *testing.T) {
+	dir := testutil.Setup(t, "http://unused")
+	writeConfigTimeout(t, dir, "timeout = 30")
+	t.Setenv("PLEXCTL_TIMEOUT", "")
+	got, err := api.ResolveTimeout(true, "abc")
+	if err == nil {
+		t.Fatalf("--timeout abc resolved to %v instead of failing", got)
+	}
+	if !strings.Contains(err.Error(), "--timeout") {
+		t.Fatalf("error does not name --timeout: %v", err)
+	}
+}
+
+// TestInvalidEnvBeatsValidConfig is the same rule one rung down.
+func TestInvalidEnvBeatsValidConfig(t *testing.T) {
+	dir := testutil.Setup(t, "http://unused")
+	writeConfigTimeout(t, dir, "timeout = 30")
+	t.Setenv("PLEXCTL_TIMEOUT", "abc")
+	if _, err := api.ResolveTimeout(false, ""); err == nil {
+		t.Fatal("an invalid $PLEXCTL_TIMEOUT was rescued by the config file")
+	}
 }
 
 // TestRequestRefusesRedirect pins W1 (finding 1): a PMS that 302s must never
@@ -277,8 +411,12 @@ func TestRequestRefusesRedirect(t *testing.T) {
 	if !strings.HasPrefix(apiErr.Message, "connection failed:") {
 		t.Fatalf("want 'connection failed:' prefix, got %q", apiErr.Message)
 	}
-	if !strings.Contains(apiErr.Message, "redirect refused") {
-		t.Fatalf("want 'redirect refused' in message, got %q", apiErr.Message)
+	// xhttp's refusal reads "redirect to <scheme>://<host> refused:
+	// redirects are not followed" where the inline CheckRedirect read
+	// "redirect refused: destination <scheme>://<host><path>". Code and exit
+	// do not change; only the wording does.
+	if !strings.Contains(apiErr.Message, "refused: redirects are not followed") {
+		t.Fatalf("want the refusal wording in message, got %q", apiErr.Message)
 	}
 	if strings.Contains(apiErr.Message, "SECRETPHRASE") || strings.Contains(apiErr.Message, "?") {
 		t.Fatalf("query string leaked into error: %q", apiErr.Message)
@@ -342,8 +480,8 @@ func TestSanitizeError(t *testing.T) {
 func TestSanitizeErrorHidesQueryOnRealTransportFailures(t *testing.T) {
 	t.Run("connection refused", func(t *testing.T) {
 		testutil.Setup(t, "http://127.0.0.1:1") // nothing listens on port 1
-		api.SetTimeoutOverride(2)
-		t.Cleanup(func() { api.ClearTimeoutOverride() })
+		api.SetTimeoutForTest(2 * time.Second)
+		t.Cleanup(func() { api.ClearTimeoutForTest() })
 		_, err := api.TryGet("/x", url.Values{"query": {"SECRETPHRASE"}})
 		if err == nil {
 			t.Fatal("want error")
@@ -362,8 +500,8 @@ func TestSanitizeErrorHidesQueryOnRealTransportFailures(t *testing.T) {
 		}))
 		defer srv.Close()
 		testutil.Setup(t, srv.URL)
-		api.SetTimeoutOverride(0.05)
-		t.Cleanup(func() { api.ClearTimeoutOverride() })
+		api.SetTimeoutForTest(50 * time.Millisecond)
+		t.Cleanup(func() { api.ClearTimeoutForTest() })
 		_, err := api.TryGet("/slow", url.Values{"query": {"SECRETPHRASE"}})
 		if err == nil {
 			t.Fatal("want error")

@@ -79,7 +79,7 @@ func newContextCmd() *cobra.Command {
 			return fmt.Errorf("invalid value for '--history-limit': '%d' is not in the range 0<=x<=10", historyLimit)
 		}
 		result, failure := sessions.Context(clients.Resolve(*client), historyLimit, !noHistory)
-		output.Print(result)
+		output.PrintOrFail(result)
 		if failure != nil {
 			output.Exit(failure.ExitCode())
 		}

@@ -43,7 +43,7 @@ Inputs: `docs/error_inventory.md` (P0.1, every emission site), `docs/skill_compe
 | 1 | user error — bad flags/args/invocation (`BAD_REQUEST`) | 64 (absorbed) and the misrouted exit-1 validation errors in streams.go |
 | 2 | Plex refused or errored (domain failures, HTTP 4xx/5xx semantics) | 1 |
 | 3 | transport — timeout, connection failure, unreachable client/cloud | 2 (timeout) and part of 1 |
-| 4 | internal plexctl bug (`INTERNAL`) | 1 |
+| 4 | internal plexctl bug, or a response plexctl could not decode (`INTERNAL`, `DECODE_ERROR`) | 1 |
 | 5 | not authenticated (`PLEX_AUTH_REQUIRED`) | 1 |
 | 6 | `NOT_APPLIED` — upstream said 2xx, verification shows nothing changed | 0 (silent no-op) or 1 |
 
@@ -55,7 +55,7 @@ Family rule for Subtrakt: the auth code contains `_AUTH_` so its cross-tool clas
 
 | Code | Exit | Fires when | hint | data fields |
 |---|---|---|---|---|
-| `BAD_REQUEST` | 1 | Any invocation error: cobra unknown command/flag/arg-count, `--timeout <= 0`, `choiceError`, empty `QUERY`/`SHOW`, seek position parse (`unrecognised position format`, `invalid seek position`), mutually-exclusive flag sets in set-audio/set-subtitle, `provide RATING_KEY…`, non-movie/show section on `collection create`, wrong ID space (HTTP 400 from PMS on play-media) | usage-shaped, e.g. `expected a ratingKey — playQueueItemID is not valid here` | `expected` (ID-space case) |
+| `BAD_REQUEST` | 1 | Any invocation error: cobra unknown command/flag/arg-count, any `--timeout`, `$PLEXCTL_TIMEOUT` or `config timeout` value that is not a whole number of seconds from 1 to 86400, `choiceError`, empty `QUERY`/`SHOW`, seek position parse (`unrecognised position format`, `invalid seek position`), mutually-exclusive flag sets in set-audio/set-subtitle, `provide RATING_KEY…`, non-movie/show section on `collection create`, wrong ID space (HTTP 400 from PMS on play-media) | usage-shaped, e.g. `expected a ratingKey — playQueueItemID is not valid here` | `expected` (ID-space case) |
 | `PLEX_AUTH_REQUIRED` | 5 | `missing config key:` (never logged in / config edited), `invalid config at …` (corrupt TOML), HTTP 401/403 from PMS or plex.tv on any command | `run: plexctl auth login` | — |
 | `PLEX_AUTH_FAILED` | 2 | `auth login` itself rejected: plex.tv sign-in HTTP >= 400 (bad credentials), unexpected auth response shape, non-JSON body | `check credentials and retry: plexctl auth login` | — |
 | `PLEX_NOTHING_PLAYING` | 2 | No current session where one is required: `watched`/`unwatched`/`rate` with no key and idle client; relative seek with no session (`could not determine current playback position`) | `provide a ratingKey` / `nothing to seek — start playback first` | — |
@@ -70,8 +70,9 @@ Family rule for Subtrakt: the auth code contains `_AUTH_` so its cross-tool clas
 | `PLEX_CLIENT_AMBIGUOUS` | 2 | Two active devices share the name | `target by machineIdentifier — run: plexctl clients` | `matches` |
 | `PLEX_CLIENT_UNREACHABLE` | 3 | Transport failure on a Companion/`:32500`/`/player/` URL — device asleep or gone; includes queue bind transport failures (paired with `PLEX_QUEUE_STAGED` per §5 precedence: the queue code wins, `clientUnreachable: true` rides in `data`) | `wake the device / relaunch Plex on it, then retry` | `client`, `url` |
 | `CLOUD_UNREACHABLE` | 3 | Transport failure against plex.tv (v1 `plex.tv ` prefix) | `plex.tv is unreachable — the local server is unaffected; retry shortly` | — |
-| `TRANSPORT_TIMEOUT` | 3 | `request timed out:` against PMS (`:32400`) | `retry — on batches, retry only timed-out items` | `url` |
+| `TRANSPORT_TIMEOUT` | 3 | `request timed out:` against PMS (`:32400`) | `retry — the request may already have been applied; on batches, retry only timed-out items` | `url` |
 | `TRANSPORT_FAILED` | 3 | `connection failed:` / `request failed:` transport class against PMS | — | `url` |
+| `DECODE_ERROR` | 4 | Response body was not the single JSON value the endpoint promised, or exceeded the size bound. Never fires on a 4xx/5xx: the HTTP status is classified first and keeps its own code | — | `url` |
 | `PLEX_SERVER_ERROR` | 2 | PMS HTTP 5xx | — | — |
 | `PLEX_HTTP_ERROR` | 2 | Any other unmapped upstream HTTP >= 400 (carries `http_status`) | — | — |
 | `PLEX_QUEUE_CREATE_FAILED` | 2 | playQueue creation returned no `playQueueID`/`selectedItemID`; mid-add failure with rollback (`data.partialQueueID`, `data.rollbackAttempted`) | `retry the queue command` | `partialQueueID`, `rollbackAttempted` |
@@ -84,9 +85,9 @@ Family rule for Subtrakt: the auth code contains `_AUTH_` so its cross-tool clas
 | `PLEX_UNSUPPORTED` | 2 | Operation the stack cannot perform: `queue-shuffle`/`queue-unshuffle` (PMS 1.43 404s them), `volume` (Apple TV Companion accepts and ignores) | — | — |
 | `PLEX_STATE_SAVE_FAILED` | n/a (warning only) | Local queue-state write failed after a successful operation — emitted in success `warnings`, never as a failure | `state file may be stale — a later queue-show can read empty` | — |
 | `NOT_APPLIED` | 6 | Upstream 2xx but verification shows nothing changed: bare `play` on an idle client (P3.1), queue-add whose post-add size verify shows no growth (replaces v1 "likely unknown or invalid"), any P1.3-verified mutation that no-ops | names the effective command, e.g. `client idle — start items with: plexctl play-media RATING_KEY` | command-specific |
-| `INTERNAL` | 4 | plexctl bug: impossible state, marshal failure, `could not retrieve server machineIdentifier` | `report this — plexctl bug` | — |
+| `INTERNAL` | 4 | plexctl bug: impossible state, marshal failure, `could not retrieve server machineIdentifier`, a failed write to stdout on the success or NDJSON path | `report this — plexctl bug` | — |
 
-30 codes incl. the warning-only one. The skill's v2 translation table maps code → phrase, ~1 row per code — down from 33 free-text rows + state-machine prose.
+31 codes incl. the warning-only one. The skill's v2 translation table maps code → phrase, ~1 row per code — down from 33 free-text rows + state-machine prose.
 
 ## 3. Migration mapping (v1 emission → v2)
 
@@ -94,7 +95,7 @@ Keyed to `docs/error_inventory.md`. P2 agents follow this table mechanically; an
 
 - **auth.go** (13 sites): URL validation → `BAD_REQUEST`. Sign-in HTTP >= 400 / response-shape / non-JSON → `PLEX_AUTH_FAILED`. Sign-in transport (`classifyAuthTransport`) → `TRANSPORT_TIMEOUT`/`TRANSPORT_FAILED`/`CLOUD_UNREACHABLE` per class. PMS-verify failures → `TRANSPORT_FAILED` (transport) or `PLEX_AUTH_FAILED` (HTTP >= 400, wrong URL/token). Config write failure → `INTERNAL`.
 - **config.go** (2): both → `PLEX_AUTH_REQUIRED`, exit 5.
-- **root.go `Execute` catch-all** (1): → `BAD_REQUEST`, exit 1 (was `Usage`/64).
+- **root.go `Execute` catch-all** (1): → `BAD_REQUEST`, exit 1 (was `Usage`/64). A `*output.CLIError` returned through a `RunE` is passed through with its own code and exit; the catch-all applies to everything else.
 - **api.go `ExitOnError`** (the chokepoint): classify by `api.Error.Kind` + target + status. `Kind == "timeout"` → `TRANSPORT_TIMEOUT` (PMS) / `PLEX_CLIENT_UNREACHABLE` (`:32500`//player/) — target classification happens HERE, in the binary, ending the skill's URL-sniffing rule. `Kind == "error"` transport → `TRANSPORT_FAILED` / `PLEX_CLIENT_UNREACHABLE` / `CLOUD_UNREACHABLE` (plex.tv base). HTTP statuses: 401/403 → `PLEX_AUTH_REQUIRED`; 404 → `PLEX_NOT_FOUND` (callers with a better meaning — queue-show/add — catch 404 before this layer, as today); 400 → `BAD_REQUEST`; 5xx → `PLEX_SERVER_ERROR`; other → `PLEX_HTTP_ERROR`.
 - **clients.go** (4 inline sites): → `PLEX_CLIENT_AMBIGUOUS`, `PLEX_CLIENT_INACTIVE` (×2), `PLEX_CLIENT_UNKNOWN`.
 - **library.go**: empty-arg Usage sites → `BAD_REQUEST`. `no metadata found` → `PLEX_NOT_FOUND`. `no unwatched episodes` → `PLEX_ALL_WATCHED`. `nothing found for` → `PLEX_NOT_FOUND`.
@@ -102,6 +103,7 @@ Keyed to `docs/error_inventory.md`. P2 agents follow this table mechanically; an
 - **transport.go**: play/pause/stop/next/prev/volume Companion failures → via ExitOnError classification (`PLEX_CLIENT_UNREACHABLE`/`PLEX_HTTP_ERROR`). seek family → `BAD_REQUEST` (parse), `PLEX_NOTHING_PLAYING` (no session), `PLEX_SEEK_FAILED` (mid-sequence). `volume` → `PLEX_UNSUPPORTED` (absorbs skill ban; P3 scope).
 - **queue.go**: per §2 rows `PLEX_QUEUE_*`, `PLEX_NO_QUEUE`, `PLEX_PLAYBACK_NOT_STARTED`; queue-add no-growth → `NOT_APPLIED`.
 - **watch.go**: no-session sites → `PLEX_NOTHING_PLAYING`; scrobble/rate HTTP failures already route through ExitOnError.
+  - **Post-v2 amendment (2026-09-05):** `watched`/`unwatched`/`rate` read the positional ratingKey *before* any client resolution, so an explicit key no longer reaches the client-resolution codes at all. An invocation with an explicit key that previously failed `PLEX_CLIENT_UNKNOWN` / `PLEX_CLIENT_INACTIVE` (exit 2) or `CLOUD_UNREACHABLE` (exit 3) now succeeds — those codes were never about the call being made. No code or exit class is added or redefined: only the set of invocations that reach them narrows. `PLEX_NOTHING_PLAYING` is unchanged and still fires on the no-key idle path. See `docs/DECISIONS.md`.
 - **collections.go / playlists.go**: zero-ratingKey / bad-section / bad-type validation → `BAD_REQUEST`. Smart refusals → `PLEX_SMART_CONTAINER`. Create-returned-nothing → `PLEX_QUEUE_CREATE_FAILED`? NO — wrong domain: new create failures use `PLEX_HTTP_ERROR` when status-driven, else `INTERNAL` (`no metadata/ratingKey in create response` is a PMS-shape surprise). machineIdentifier failures → `INTERNAL`. Per-item add errors with partial count → `PLEX_QUEUE_PARTIAL` semantics? Reuse: yes — `PLEX_QUEUE_PARTIAL` is renamed conceptually "partial batch mutation"; it applies to collection/playlist add too (`data.added`).
 - **sessions.go `context`**: top-level `ok` becomes the AND of all fetched sections; per-section failures embed `{ok:false, error:{code…}}` in place. Exit = 0 only if all sections succeeded; else the exit class of the first failed section. (Fixes the inventory's now-playing-only inconsistency.)
 

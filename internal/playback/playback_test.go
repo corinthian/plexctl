@@ -265,8 +265,15 @@ func TestNextPersistedCommandIDRemovesTmpFileOnRenameFailure(t *testing.T) {
 	if ok {
 		t.Fatal("expected ok=false after a rename failure")
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "commandid.tmp")); !os.IsNotExist(statErr) {
-		t.Fatalf("leftover commandid.tmp after failed rename: statErr=%v", statErr)
+	// atomicfile.Write names its temp with os.CreateTemp(dir, ".tmp-*"), so
+	// the assertion moves from a fixed path to a glob. What it pins is
+	// unchanged: no temp survives a failed rename (contract 2.8).
+	leftovers, globErr := filepath.Glob(filepath.Join(dir, ".tmp-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(leftovers) != 0 {
+		t.Fatalf("leftover temp files after failed rename: %v", leftovers)
 	}
 }
 
@@ -365,8 +372,8 @@ func TestTimeoutClassification(t *testing.T) {
 	}))
 	t.Cleanup(slow.Close)
 	testutil.Setup(t, "http://pms.test:32400")
-	api.SetTimeoutOverride(0.05)
-	t.Cleanup(api.ClearTimeoutOverride)
+	api.SetTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(api.ClearTimeoutForTest)
 
 	_, cliErr := Play(fakeClient(slow.URL))
 	if cliErr == nil {
@@ -949,8 +956,37 @@ func TestPlayRefusesRedirect(t *testing.T) {
 	if !strings.HasPrefix(cliErr.Message, "connection failed:") {
 		t.Fatalf("want 'connection failed:' prefix, got %q", cliErr.Message)
 	}
-	if !strings.Contains(cliErr.Message, "redirect refused") {
-		t.Fatalf("want 'redirect refused' in message, got %q", cliErr.Message)
+	if !strings.Contains(cliErr.Message, "refused: redirects are not followed") {
+		t.Fatalf("want the refusal wording in message, got %q", cliErr.Message)
+	}
+}
+
+// TestRefusedRedirectKeepsTargetClassification pins contract 2.2's last
+// plexctl bullet: under RejectAll the refusal must keep the target's
+// classification, so a refused redirect from a client target stays
+// PLEX_CLIENT_UNREACHABLE at exit 3 rather than collapsing into a generic
+// transport code. This is today's behaviour and the migration to
+// xhttp.NewClient has to preserve it.
+func TestRefusedRedirectKeepsTargetClassification(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	_, cliErr := Play(fakeClient(srv.URL))
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeClientUnreachable || cliErr.ExitCode() != 3 {
+		t.Fatalf("code = %q exit %d, want PLEX_CLIENT_UNREACHABLE exit 3", cliErr.Code, cliErr.ExitCode())
+	}
+	if cliErr.Code == output.CodeDecodeError {
+		t.Fatal("a refused redirect must not classify as a decode error")
 	}
 }
 
@@ -987,5 +1023,78 @@ func TestCommandIDFileModesArePrivate(t *testing.T) {
 	nextCommandID()
 	if info, err := os.Stat(commandIDFile); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("commandid mode after self-heal = %o, err=%v, want 0600", info.Mode().Perm(), err)
+	}
+}
+
+// oversizeCompanion serves a body one byte over api.BodyLimit at the given
+// status.
+func oversizeCompanion(t *testing.T, status int) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if status != 200 {
+			w.WriteHeader(status)
+		}
+		w.Write([]byte(`{"pad":"`))
+		buf := make([]byte, 1<<20)
+		for i := range buf {
+			buf[i] = ' '
+		}
+		remaining := api.BodyLimit + 1 - 10
+		for remaining > 0 {
+			n := int64(len(buf))
+			if remaining < n {
+				n = remaining
+			}
+			w.Write(buf[:n])
+			remaining -= n
+		}
+		w.Write([]byte(`"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestCompanionOversizeIsDecodeError pins contract 2.3's scope line: the
+// bound applies to every response read, the Companion leg included, even
+// though a Companion response need not be JSON. Before this the read
+// truncated at 32 MiB in silence.
+func TestCompanionOversizeIsDecodeError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 64 MiB body")
+	}
+	url := oversizeCompanion(t, 200)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	_, cliErr := playerCmd(fakeClient(url), "/player/playback/play", nil)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeDecodeError || cliErr.ExitCode() != 4 {
+		t.Fatalf("code = %q exit %d, want DECODE_ERROR exit 4", cliErr.Code, cliErr.ExitCode())
+	}
+	if cliErr.Hint != "" {
+		t.Fatalf("DECODE_ERROR must carry no hint, got %q", cliErr.Hint)
+	}
+	if !strings.Contains(cliErr.Message, "64 MiB") {
+		t.Fatalf("message does not name the bound: %q", cliErr.Message)
+	}
+}
+
+// TestCompanionOversizeOn404KeepsHTTPCode is the ordering half: the status
+// is classified before the read failure, so an oversize body never converts
+// a 4xx from the client into a decode error.
+func TestCompanionOversizeOn404KeepsHTTPCode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 64 MiB body")
+	}
+	url := oversizeCompanion(t, 404)
+	testutil.Setup(t, "http://pms.test:32400")
+
+	_, cliErr := playerCmd(fakeClient(url), "/player/playback/play", nil)
+	if cliErr == nil {
+		t.Fatal("want a CLIError")
+	}
+	if cliErr.Code != output.CodeHTTPError || cliErr.HTTPStatus != 404 {
+		t.Fatalf("code = %q status %d, want PLEX_HTTP_ERROR 404", cliErr.Code, cliErr.HTTPStatus)
 	}
 }

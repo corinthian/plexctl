@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,9 +30,12 @@ import (
 	"time"
 
 	"github.com/corinthian/plexctl/internal/api"
+	"github.com/corinthian/plexctl/internal/app"
+	"github.com/corinthian/plexctl/internal/atomicfile"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/output"
+	"github.com/corinthian/plexctl/internal/xhttp"
 )
 
 // CompanionTransportError mirrors playback.CompanionTransportError.
@@ -114,12 +116,11 @@ func nextPersistedCommandID(minExclusive int64) (int64, bool) {
 	// Atomic write: temp file + rename, so the value file is never observed
 	// partial or empty (mirrors queuestate.writeAll). This is the sole
 	// guarantor of cross-process monotonicity across a crash.
-	tmp := commandIDPath() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(next, 10)), 0o600); err != nil {
-		return 0, false
-	}
-	if err := os.Rename(tmp, commandIDPath()); err != nil {
-		_ = os.Remove(tmp) // best-effort: don't leave a stale .tmp behind on a failed rename
+	// atomicfile: unique temp in the target's own directory, 0600 before any
+	// write, fsync, rename, temp removed on every failing path. An error here
+	// is the same signal os.WriteFile or os.Rename returning one was, and the
+	// in-memory reseed fallback in nextCommandID is unchanged.
+	if err := atomicfile.Write(commandIDPath(), []byte(strconv.FormatInt(next, 10))); err != nil {
 		return 0, false
 	}
 	return next, true
@@ -152,8 +153,8 @@ func nextCommandID() int64 {
 // companionHeaders builds the header set shared by _player_cmd and
 // _player_get in the Python original.
 func companionHeaders(client jsonx.J) map[string]string {
-	cfg := config.Load()
-	token := config.Require("token")
+	cfg := app.Current().Config()
+	token := app.Current().Require("token")
 	clientID := config.StringOr(cfg, "client_id", config.Defaults["client_id"])
 	headers := api.Headers(token, clientID)
 	headers["X-Plex-Target-Client-Identifier"] = jsonx.AsStr(client["machineIdentifier"])
@@ -174,15 +175,21 @@ func companionGet(client jsonx.J, path string, params url.Values) (*http.Respons
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	httpClient := api.NewHTTPClient(time.Duration(api.DefaultTimeout()*float64(time.Second)), nil)
+	httpClient := api.NewHTTPClient(api.Timeout(), nil)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer resp.Body.Close()
-	// PMS library responses are legitimately large; 32 MiB just yields a
-	// JSON parse error downstream on truncation, not a sentinel to handle.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	// ReadBody closes the body on every path, so there is no defer here. The
+	// bound applies even though a Companion response need not be JSON
+	// (contract 2.3). resp is returned alongside the error so the caller can
+	// classify the HTTP status before the read failure.
+	body, err := xhttp.ReadBody(resp, api.BodyLimit)
+	if errors.Is(err, xhttp.ErrOversize) {
+		// Carries cause.Oversize, which api.Classify maps to DECODE_ERROR 4
+		// whatever the target.
+		return resp, nil, api.OversizeError(http.MethodGet, path)
+	}
 	if err != nil {
 		return resp, nil, err
 	}
@@ -200,6 +207,12 @@ func companionGet(client jsonx.J, path string, params url.Values) (*http.Respons
 // api.SanitizeError so no query string (which can carry the token) ever
 // reaches the envelope.
 func classifyTransportErr(err error) *api.Error {
+	// An *api.Error already knows its own classification — the oversize case
+	// carries cause.Oversize — and rebuilding it here would throw that away.
+	var ae *api.Error
+	if errors.As(err, &ae) {
+		return ae
+	}
 	var ne net.Error
 	if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) {
 		return &api.Error{Message: "request timed out: " + api.SanitizeError(err), Kind: "timeout"}
@@ -226,13 +239,18 @@ func playerCmd(client jsonx.J, path string, extra map[string]string) (jsonx.J, *
 	}
 
 	resp, body, err := companionGet(client, path, params)
-	if err != nil {
+	if err != nil && resp == nil {
 		return nil, api.Classify(classifyTransportErr(err), api.TargetClient)
 	}
-	// raise_for_status() only raises on 4xx/5xx -- 3xx is not an error.
+	// raise_for_status() only raises on 4xx/5xx -- 3xx is not an error. The
+	// status is classified before any read failure, so an oversize body
+	// never converts a 4xx into a decode error (contract 2.3).
 	if resp.StatusCode >= 400 {
 		msg := api.FormatHTTPError(resp.StatusCode, resp.Header.Get("Content-Type"), string(body), http.StatusText(resp.StatusCode))
 		return nil, output.Err(output.CodeHTTPError, msg).WithHTTPStatus(resp.StatusCode)
+	}
+	if err != nil {
+		return nil, api.Classify(classifyTransportErr(err), api.TargetClient)
 	}
 	return jsonx.J{"ok": true}, nil
 }
@@ -247,12 +265,22 @@ func PlayerGet(client jsonx.J, path string, extraParams map[string]string) (json
 	}
 
 	resp, body, err := companionGet(client, path, params)
-	if err != nil {
+	if err != nil && resp == nil {
 		return nil, &CompanionTransportError{Msg: err.Error()}
 	}
-	// raise_for_status() only raises on 4xx/5xx -- 3xx is not an error.
+	// raise_for_status() only raises on 4xx/5xx -- 3xx is not an error, and
+	// the status is classified before any read failure.
 	if resp.StatusCode >= 400 {
 		return nil, &CompanionTransportError{Msg: resp.Status}
+	}
+	if err != nil {
+		// An oversize body is an *api.Error carrying cause.Oversize; the
+		// caller hands it to api.Classify, which maps it to DECODE_ERROR 4.
+		var ae *api.Error
+		if errors.As(err, &ae) {
+			return nil, ae
+		}
+		return nil, &CompanionTransportError{Msg: err.Error()}
 	}
 	if strings.TrimSpace(string(body)) == "" {
 		return jsonx.J{}, nil
@@ -530,7 +558,7 @@ func PlayQueue(client jsonx.J, queueID, selectedItemID string) (jsonx.J, *output
 	if serverID == "" {
 		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
-	cfg := config.Load()
+	cfg := app.Current().Config()
 	serverURL := config.StringOr(cfg, "server_url", config.Defaults["server_url"])
 	address, port := hostPort(serverURL)
 	params := map[string]string{
@@ -553,7 +581,7 @@ func PlayMedia(client jsonx.J, ratingKey string) (jsonx.J, *output.CLIError) {
 	if serverID == "" {
 		return nil, output.Err(output.CodeInternal, "could not retrieve server machineIdentifier")
 	}
-	cfg := config.Load()
+	cfg := app.Current().Config()
 	serverURL := config.StringOr(cfg, "server_url", config.Defaults["server_url"])
 	address, port := hostPort(serverURL)
 	key := "/library/metadata/" + ratingKey

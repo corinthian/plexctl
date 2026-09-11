@@ -11,6 +11,10 @@ go build -o dist/plexctl ./cmd/plexctl  # single-arch dev build
 
 Requires Go 1.26+. No runtime dependencies.
 
+`build.sh` resolves the version it stamps in this order: a positional argument, else `$PLEXCTL_BUILD_VERSION` if set, else the exact git tag on HEAD (leading `v` stripped), else `var Version` in `internal/api/api.go`. If none of the four yields a value it fails rather than stamping an empty version. It also runs the CI gates (`govulncheck`, `go vet`, `gofmt -l`, `go test`, `go test -race`, `go mod tidy -diff`) before building, and after `lipo` it runs `dist/plexctl --version` and fails unless it equals `plexctl version <VERSION>` exactly, not just as a substring.
+
+Codesigning is ad-hoc (`codesign -s -`). A failure warns and continues by default; set `PLEXCTL_RELEASE=1` to make it fatal so a release never ships unsigned.
+
 ## Setup
 
 ```
@@ -20,7 +24,9 @@ plexctl auth login
 Writes `~/.config/plexctl/config.toml` (mode 0600) with the server URL, auth token, default client, and a generated client ID. `queue_state.json` lives alongside it in the same directory.
 
 - `$PLEXCTL_CONFIG_DIR` redirects the whole config directory — both `config.toml` and `queue_state.json`.
-- Timeout resolution: `--timeout` > `$PLEXCTL_TIMEOUT` > config `timeout` > 10s.
+- Timeout resolution: `--timeout` > `$PLEXCTL_TIMEOUT` > config `timeout` > 10s. All three take a whole number of seconds, base 10, no sign, no separators and no unit suffix, in the closed range 1 to 86400. `30s`, `10.5` and `1e3` are rejected, nothing is trimmed (`" 30 "` is an error, not 30), and a rejected value is `BAD_REQUEST` at exit 1 naming the source — no source ever falls through silently to the next one or to the default. An empty `$PLEXCTL_TIMEOUT` counts as unset; an empty `--timeout` is an explicit mistake and is rejected.
+- In the config file, `timeout` must be a TOML integer. A file holding `timeout = 10.5`, `timeout = 10.0` or `timeout = "10"` is an error and must be edited to `timeout = 10`.
+- Login preserves any other key already in `config.toml`. If the existing file is unusable (malformed TOML, or unreadable), login moves it aside to `config.toml.corrupt-<timestamp>`, warns on stderr, writes only the four managed keys, and reports the backup path as `configBackup` on the success envelope.
 
 ## Security
 
@@ -40,7 +46,7 @@ Success: `{"ok": true, ...}`, one JSON document on stdout. Failure: `{"ok": fals
 - `1` — bad invocation (`BAD_REQUEST`: flags, args, validation) — never retry; fix the command
 - `2` — Plex refused or errored (domain failures, HTTP 4xx/5xx semantics)
 - `3` — transport (timeout, connection failure, unreachable client/cloud) — `TRANSPORT_TIMEOUT` items are safe to retry
-- `4` — internal plexctl bug
+- `4` — internal plexctl bug, or a response plexctl could not decode (`DECODE_ERROR`)
 - `5` — not authenticated — run `plexctl auth login`
 - `6` — `NOT_APPLIED`: upstream said 2xx but verification shows nothing changed (e.g. `play` on an idle client)
 
@@ -53,6 +59,8 @@ Success: `{"ok": true, ...}`, one JSON document on stdout. Failure: `{"ok": fals
 - Bare `play` only resumes; against an idle client it verifies engagement and exits 6 (`NOT_APPLIED`) with a hint naming `play-media`.
 - `X-Plex-Version`/`X-Plex-Platform` headers report plexctl's own identity.
 - macOS Local Network privacy: the Local Network TCC grant attaches to the *terminal* the binary runs under. plexctl's LAN access to the PMS works once a terminal has been granted; background contexts (launchd, cron, a different terminal) get silently denied and black-hole TCP to the PMS.
+- `watched`, `unwatched` and `rate` read their ratingKey argument before resolving any client, so marking a known item works with the target device asleep — no `/clients` or plex.tv call is made. `--client` alongside an explicit ratingKey is inert. Omit the ratingKey and the client is resolved as before to find what is playing (`PLEX_NOTHING_PLAYING`, exit 2, when nothing is).
+- `clients` lists one row per addressable device, keyed on what PMS reports as active rather than on the plex.tv device list. Two active devices sharing a name each get their own row and `machineIdentifier` (all flagged `ambiguous: true`), and `PLEX_CLIENT_AMBIGUOUS` lists every one of them under `data.matches` — so the identifier the error tells you to target is always in the error. An active device plex.tv has no record of is listed too, with `lastSeen: null`. Both halves of the `"N/M clients currently controllable"` note can therefore differ from what an older binary printed for the same network.
 - `queue` resolves the target client *before* creating the play queue: an unresolvable or inactive client exits without leaving an orphaned server-side queue. On a double failure (inactive client plus bad rating keys) the resolver error takes precedence.
 - A `queue` bind failure doesn't emit a bare error: it resolves to `PLEX_QUEUE_STAGED` (state recorded — recover with `queue-start`) or `PLEX_QUEUE_CONFLICT` (a prior queue is still the active record — re-run `queue` once the device is back), with `playQueueID`/`selectedItemID`/`clientUnreachable` under `data`. `staged` derives from the persisted write itself, never a separate read, so it can't disagree with what's actually on disk; if that write itself fails, the error codes `INTERNAL` and says so.
 - A verified `queue` success whose local state write fails reports `ok: true` with a `PLEX_STATE_SAVE_FAILED` warning instead of a false failure — playback already started; the warning explains why a later `queue-show` might read empty.

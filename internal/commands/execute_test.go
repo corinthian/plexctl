@@ -71,7 +71,7 @@ func TestExecuteHelpAndVersionExitZero(t *testing.T) {
 func TestTimeoutFlagNonPositiveExitsUsage(t *testing.T) {
 	oldArgs := os.Args
 	defer func() { os.Args = oldArgs }()
-	t.Cleanup(func() { api.ClearTimeoutOverride() })
+	t.Cleanup(func() { api.ClearTimeoutForTest() })
 
 	cases := []struct {
 		name string

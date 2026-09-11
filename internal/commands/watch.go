@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/corinthian/plexctl/internal/clients"
-	"github.com/corinthian/plexctl/internal/jsonx"
 	"github.com/corinthian/plexctl/internal/library"
 	"github.com/corinthian/plexctl/internal/output"
 	"github.com/corinthian/plexctl/internal/sessions"
@@ -23,16 +22,24 @@ func init() {
 	})
 }
 
-// resolveTargetKey mirrors the shared shape of watched/unwatched/rate: the
-// client is resolved BEFORE the ratingKey argument is consulted (matches
-// cli.py's statement order), and an idle client with no explicit ratingKey
-// is the one guarded failure.
-func resolveTargetKey(client jsonx.J, explicit string) (string, bool) {
-	if explicit != "" {
-		return explicit, true
-	}
-	key := sessions.CurrentRatingKey(client)
+// currentKeyOrFail is the shared no-argument path of watched/unwatched/rate:
+// only when the caller omits the ratingKey is a client involved at all.
+//
+// The invariant, and the fix these three commands carry: the positional
+// argument is read FIRST. An explicit ratingKey addresses the library, not a
+// device, so it must not depend on one being awake — resolving a client
+// before looking at the argument (cli.py's statement order, which this port
+// inherited) meant `plexctl watched 12345` failed PLEX_CLIENT_UNKNOWN /
+// PLEX_CLIENT_INACTIVE or CLOUD_UNREACHABLE with the Apple TV asleep, for a
+// call that needs neither /clients nor plex.tv.
+//
+// --client alongside an explicit key is therefore inert, not rejected:
+// rejecting would break habitual callers that always pass it, for no safety
+// gain.
+func currentKeyOrFail(clientName string) (string, bool) {
+	key := sessions.CurrentRatingKey(clients.Resolve(clientName))
 	if key == "" {
+		output.FailErr(output.Err(output.CodeNothingPlaying, "nothing playing — provide a ratingKey").WithHint("provide a ratingKey"))
 		return "", false
 	}
 	return key, true
@@ -46,15 +53,15 @@ func newWatchedCmd() *cobra.Command {
 	}
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		target := clients.Resolve(*client)
-		var explicit string
+		key := ""
 		if len(args) == 1 {
-			explicit = args[0]
+			key = args[0]
 		}
-		key, ok := resolveTargetKey(target, explicit)
-		if !ok {
-			output.FailErr(output.Err(output.CodeNothingPlaying, "nothing playing — provide a ratingKey").WithHint("provide a ratingKey"))
-			return nil
+		if key == "" {
+			var ok bool
+			if key, ok = currentKeyOrFail(*client); !ok {
+				return nil
+			}
 		}
 		output.Out(library.Scrobble(key))
 		return nil
@@ -70,15 +77,15 @@ func newUnwatchedCmd() *cobra.Command {
 	}
 	client := addClientFlag(cmd)
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		target := clients.Resolve(*client)
-		var explicit string
+		key := ""
 		if len(args) == 1 {
-			explicit = args[0]
+			key = args[0]
 		}
-		key, ok := resolveTargetKey(target, explicit)
-		if !ok {
-			output.FailErr(output.Err(output.CodeNothingPlaying, "nothing playing — provide a ratingKey").WithHint("provide a ratingKey"))
-			return nil
+		if key == "" {
+			var ok bool
+			if key, ok = currentKeyOrFail(*client); !ok {
+				return nil
+			}
 		}
 		output.Out(library.Unscrobble(key))
 		return nil
@@ -98,15 +105,15 @@ func newRateCmd() *cobra.Command {
 		if err != nil || rating < 0 || rating > 10 {
 			return fmt.Errorf("invalid value for 'RATING': '%s' is not in the range 0<=x<=10", args[0])
 		}
-		target := clients.Resolve(*client)
-		var explicit string
+		key := ""
 		if len(args) == 2 {
-			explicit = args[1]
+			key = args[1]
 		}
-		key, ok := resolveTargetKey(target, explicit)
-		if !ok {
-			output.FailErr(output.Err(output.CodeNothingPlaying, "nothing playing — provide a ratingKey").WithHint("provide a ratingKey"))
-			return nil
+		if key == "" {
+			var ok bool
+			if key, ok = currentKeyOrFail(*client); !ok {
+				return nil
+			}
 		}
 		output.Out(library.Rate(key, rating))
 		return nil

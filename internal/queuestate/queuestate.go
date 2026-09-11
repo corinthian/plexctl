@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/corinthian/plexctl/internal/atomicfile"
 	"github.com/corinthian/plexctl/internal/config"
 	"github.com/corinthian/plexctl/internal/jsonx"
 )
@@ -80,15 +81,12 @@ func writeAll(state jsonx.J) error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		_ = os.Remove(tmp) // best-effort: don't leave a stale .tmp behind on a failed rename
-		return err
-	}
-	return nil
+	// atomicfile creates a unique temp in the target's own directory, chmods
+	// it 0600 before any bytes are written, fsyncs before the rename and
+	// removes the temp on every failing path. The MkdirAll above stays here:
+	// atomicfile never creates directories. Locking stays the caller's job —
+	// withLock still wraps the whole read-modify-write.
+	return atomicfile.Write(p, b)
 }
 
 // Save mirrors queue_state.save: no-op on empty mid/queueID; selectedID ""

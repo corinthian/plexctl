@@ -182,11 +182,11 @@ unrecognized token. Use "--" to force everything after it into POSITION.`,
 					if i >= len(args) {
 						return fmt.Errorf("flag needs an argument: %s", a)
 					}
-					if err := setSeekTimeoutOverride(args[i]); err != nil {
+					if err := setSeekTimeout(args[i]); err != nil {
 						return err
 					}
 				case strings.HasPrefix(a, "--timeout="):
-					if err := setSeekTimeoutOverride(strings.TrimPrefix(a, "--timeout=")); err != nil {
+					if err := setSeekTimeout(strings.TrimPrefix(a, "--timeout=")); err != nil {
 						return err
 					}
 				default:
@@ -210,20 +210,20 @@ unrecognized token. Use "--" to force everything after it into POSITION.`,
 	return cmd
 }
 
-// setSeekTimeoutOverride applies seek's hand-parsed --timeout exactly as
-// root.go's PersistentPreRunE would for every other command, including the
-// W1 non-positive rejection — seek's DisableFlagParsing means root's own
-// boundary check never runs for this command, so this is the only place
-// that guards against reproducing the --timeout 0 hang here.
-func setSeekTimeoutOverride(raw string) error {
-	v, err := strconv.ParseFloat(raw, 64)
+// setSeekTimeout applies seek's hand-parsed --timeout through exactly the
+// parser root.go's PersistentPreRunE uses, with the same source name.
+// seek's DisableFlagParsing means root never marks the persistent flag
+// Changed here, so root resolves the env, the config or the default and this
+// is the only place the flag itself is seen (contract 2.1, plexctl
+// exception). Both the `--timeout X` and `--timeout=X` spellings reach it,
+// and an empty value from either is set-and-empty: a mistake, not an unset
+// source.
+func setSeekTimeout(raw string) error {
+	d, err := api.ResolveTimeout(true, raw)
 	if err != nil {
-		return fmt.Errorf("invalid value for '--timeout': '%s' is not a valid float", raw)
+		return err
 	}
-	if v <= 0 {
-		return fmt.Errorf("invalid value for '--timeout': %v is not greater than 0", v)
-	}
-	api.SetTimeoutOverride(v)
+	api.SetTimeout(d)
 	return nil
 }
 

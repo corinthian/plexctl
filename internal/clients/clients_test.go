@@ -64,6 +64,9 @@ func registeredEntry(name string) jsonx.J {
 	return d
 }
 
+// TestMergeClientsAmbiguousDuplicates used to pin the defect — "first active
+// wins", both rows carrying mid-1. Inverted: the rows are now one per active
+// device, in the order PMS reported them, each keeping its own identity.
 func TestMergeClientsAmbiguousDuplicates(t *testing.T) {
 	active := []jsonx.J{
 		activeEntry("Apple TV", "mid-1", "10.0.0.5", 32500),
@@ -75,15 +78,17 @@ func TestMergeClientsAmbiguousDuplicates(t *testing.T) {
 	if len(out) != 2 {
 		t.Fatalf("want 2 rows, got %d: %#v", len(out), out)
 	}
+	wantMID := []string{"mid-1", "mid-2"}
+	wantBase := []string{"http://10.0.0.5:32500", "http://10.0.0.6:32500"}
 	for i, row := range out {
 		if row["ambiguous"] != true {
 			t.Fatalf("row %d: ambiguous = %#v, want true", i, row["ambiguous"])
 		}
-		if row["machineIdentifier"] != "mid-1" {
-			t.Fatalf("row %d: machineIdentifier = %#v, want mid-1 (first active wins)", i, row["machineIdentifier"])
+		if row["machineIdentifier"] != wantMID[i] {
+			t.Fatalf("row %d: machineIdentifier = %#v, want %s", i, row["machineIdentifier"], wantMID[i])
 		}
-		if row["baseurl"] != "http://10.0.0.5:32500" {
-			t.Fatalf("row %d: baseurl = %#v", i, row["baseurl"])
+		if row["baseurl"] != wantBase[i] {
+			t.Fatalf("row %d: baseurl = %#v, want %s", i, row["baseurl"], wantBase[i])
 		}
 		if row["active"] != true {
 			t.Fatalf("row %d: active = %#v, want true", i, row["active"])
@@ -112,11 +117,17 @@ func TestMergeClientsInactiveRegisteredDevice(t *testing.T) {
 	active := []jsonx.J{activeEntry("Apple TV", "mid-1", "h", 1)}
 	registered := []jsonx.J{registeredEntry("Safari")}
 
+	// Two rows now: the registered-but-inactive Safari, plus a synthetic row
+	// for the active Apple TV plex.tv did not list (see
+	// TestMergeClientsKeepsActiveAbsentFromPlexTV). This case is about Safari.
 	out := mergeClients(active, registered)
-	if len(out) != 1 {
-		t.Fatalf("want 1 row, got %d", len(out))
+	if len(out) != 2 {
+		t.Fatalf("want 2 rows, got %d: %#v", len(out), out)
 	}
 	row := out[0]
+	if row["name"] != "Safari" {
+		t.Fatalf("row 0 = %#v, want the registered Safari row first", row)
+	}
 	if row["active"] != false {
 		t.Fatalf("active = %#v, want false", row["active"])
 	}
@@ -162,9 +173,11 @@ func TestMergeClientsNamelessRegisteredDevice(t *testing.T) {
 	active := []jsonx.J{activeEntry("Apple TV", "mid-1", "h", 1)}
 	registered := []jsonx.J{registeredEntry("")}
 
+	// The nameless registered row can join nothing, and the active Apple TV
+	// it cannot be matched to still gets its own synthetic row.
 	out := mergeClients(active, registered)
-	if len(out) != 1 {
-		t.Fatalf("want 1 row, got %d", len(out))
+	if len(out) != 2 {
+		t.Fatalf("want 2 rows, got %d: %#v", len(out), out)
 	}
 	row := out[0]
 	if row["name"] != nil {
@@ -199,8 +212,9 @@ func resolvedRow(name, mid, baseurl string, active, ambiguous bool) jsonx.J {
 
 func sampleClients() []jsonx.J {
 	return []jsonx.J{
+		// Post-merge shape: same-named actives keep distinct identities.
 		resolvedRow("Apple TV", "mid-1", "http://10.0.0.5:32500", true, true),
-		resolvedRow("Apple TV", "mid-1", "http://10.0.0.5:32500", true, true),
+		resolvedRow("Apple TV", "mid-2", "http://10.0.0.6:32500", true, true),
 		resolvedRow("Safari", "", "", false, false),
 		resolvedRow("Mac", "mid-3", "http://10.0.0.9:32500", true, false),
 	}
@@ -225,7 +239,7 @@ func TestResolveInAmbiguousByName(t *testing.T) {
 	if !strings.Contains(out, `"hint":"target by machineIdentifier — run: plexctl clients"`) {
 		t.Fatalf("hint drifted: %q", out)
 	}
-	if !strings.Contains(out, `"data":{"matches":[{"machineIdentifier":"mid-1","name":"Apple TV"}]}`) {
+	if !strings.Contains(out, `"data":{"matches":[{"machineIdentifier":"mid-1","name":"Apple TV"},{"machineIdentifier":"mid-2","name":"Apple TV"}]}`) {
 		t.Fatalf("data drifted: %q", out)
 	}
 }
@@ -321,7 +335,87 @@ func TestResolveInPass2BailsAmbiguousRegardlessOfMID(t *testing.T) {
 	if !strings.Contains(out, `"message":"ambiguous client name 'Apple TV' — multiple active devices share this name; specify by machineIdentifier"`) {
 		t.Fatalf("message drifted: %q", out)
 	}
-	if !strings.Contains(out, `"data":{"matches":[{"machineIdentifier":"mid-1","name":"Apple TV"}]}`) {
+	if !strings.Contains(out, `"data":{"matches":[{"machineIdentifier":"mid-1","name":"Apple TV"},{"machineIdentifier":"mid-2","name":"Apple TV"}]}`) {
 		t.Fatalf("data drifted: %q", out)
+	}
+}
+
+// TestMergeClientsRetainsEveryActiveIdentifier pins the item-3 fix. Two
+// active devices sharing a name used to collapse onto the first one's
+// machineIdentifier: every row carried mid-A, so the second device was
+// unaddressable — and PLEX_CLIENT_AMBIGUOUS told the caller to "specify by
+// machineIdentifier" while listing only the one identifier it had kept. The
+// merge now emits one row per active device, each with its own identity.
+func TestMergeClientsRetainsEveryActiveIdentifier(t *testing.T) {
+	active := []jsonx.J{
+		activeEntry("TV", "A", "10.0.0.5", 32500),
+		activeEntry("TV", "B", "10.0.0.6", 32500),
+	}
+	registered := []jsonx.J{registeredEntry("TV"), registeredEntry("TV")}
+
+	out := mergeClients(active, registered)
+	byMID := map[string]jsonx.J{}
+	for _, row := range out {
+		mid, _ := row["machineIdentifier"].(string)
+		byMID[mid] = row
+	}
+	for _, mid := range []string{"A", "B"} {
+		row, ok := byMID[mid]
+		if !ok {
+			t.Fatalf("no row for machineIdentifier %q: %#v", mid, out)
+		}
+		if row["ambiguous"] != true || row["active"] != true {
+			t.Fatalf("row %q: ambiguous=%#v active=%#v, want true/true", mid, row["ambiguous"], row["active"])
+		}
+	}
+	if byMID["A"]["baseurl"] != "http://10.0.0.5:32500" || byMID["B"]["baseurl"] != "http://10.0.0.6:32500" {
+		t.Fatalf("each ambiguous row must keep its own baseurl: %#v", out)
+	}
+	// Two same-named actives are two rows, not one per registered row:
+	// pairing N registered rows to N identifier-less actives is unsolvable
+	// and would rebuild the same defect.
+	if len(out) != 2 {
+		t.Fatalf("want 2 rows (one per active device), got %d: %#v", len(out), out)
+	}
+
+	// The recommended recovery — target the machineIdentifier the error
+	// listed — has to resolve.
+	var got jsonx.J
+	capOut, code := testutil.Capture(t, func() { got = resolveIn(out, "B") })
+	if code != -1 {
+		t.Fatalf("resolveIn(rows, \"B\") exited %d: %s", code, capOut)
+	}
+	if got["machineIdentifier"] != "B" || got["baseurl"] != "http://10.0.0.6:32500" {
+		t.Fatalf("resolved = %#v, want the B device", got)
+	}
+}
+
+// TestMergeClientsKeepsActiveAbsentFromPlexTV covers the other half of the
+// same defect: the merge iterated registered devices only, so a client PMS
+// reports as active but plex.tv has no row for vanished from `clients`
+// entirely — unlistable and therefore untargetable.
+func TestMergeClientsKeepsActiveAbsentFromPlexTV(t *testing.T) {
+	active := []jsonx.J{activeEntry("Kitchen", "mid-k", "10.0.0.7", 32500)}
+	registered := []jsonx.J{registeredEntry("Safari")}
+
+	out := mergeClients(active, registered)
+	if len(out) != 2 {
+		t.Fatalf("want 2 rows (registered Safari + synthetic Kitchen), got %d: %#v", len(out), out)
+	}
+	var synthetic jsonx.J
+	for _, row := range out {
+		if row["name"] == "Kitchen" {
+			synthetic = row
+		}
+	}
+	if synthetic == nil {
+		t.Fatalf("no row for the active-but-unregistered device: %#v", out)
+	}
+	if synthetic["active"] != true || synthetic["machineIdentifier"] != "mid-k" ||
+		synthetic["baseurl"] != "http://10.0.0.7:32500" || synthetic["ambiguous"] != false {
+		t.Fatalf("synthetic row = %#v", synthetic)
+	}
+	if synthetic["lastSeen"] != nil {
+		t.Fatalf("lastSeen = %#v, want nil — plex.tv has no row to date it", synthetic["lastSeen"])
 	}
 }

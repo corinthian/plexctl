@@ -12,7 +12,7 @@ allowed-tools:
   - "Bash(jq:*)"
 ---
 
-# Plex Skill (v2 — requires plexctl ≥ 2.0.0)
+# Plex Skill (v2 — requires plexctl ≥ 2.0.1)
 
 Goal: smooth find / watch / play UX. Hide plexctl noise. Never surface internal IDs, raw envelopes, or codes unless `debug_mode`.
 
@@ -34,7 +34,7 @@ Goal: smooth find / watch / play UX. Hide plexctl noise. Never surface internal 
 
 ## The Error Contract
 
-Every failure is `{ok:false, error:{code, message, http_status?, hint?}, data?}` on stdout, exit codes: 1 bad invocation, 2 Plex refused, 3 transport, 4 plexctl bug, 5 not logged in, 6 accepted-but-nothing-happened.
+Every failure is `{ok:false, error:{code, message, http_status?, hint?}, data?}` on stdout, exit codes: 1 bad invocation, 2 Plex refused, 3 transport, 4 plexctl bug or a response it could not decode, 5 not logged in, 6 accepted-but-nothing-happened.
 
 Two rules:
 
@@ -56,7 +56,7 @@ Two rules:
 | PLEX_CLIENT_UNKNOWN / _INACTIVE / _AMBIGUOUS | Client problem — say which per the message; recovery per hint. |
 | PLEX_CLIENT_UNREACHABLE | Apple TV isn't responding. If Plex is open on it, relaunch the app. Don't retry until the user says it's back. |
 | CLOUD_UNREACHABLE | plex.tv is unreachable — your server is fine; try shortly. |
-| TRANSPORT_TIMEOUT | Plex was slow to answer — retrying may work. (Batches: retry only TIMEOUT items.) |
+| TRANSPORT_TIMEOUT | Plex was slow to answer. The request may already have been applied — say so before retrying anything that changes state. (Batches: retry only TIMEOUT items.) |
 | TRANSPORT_FAILED / PLEX_SERVER_ERROR / PLEX_HTTP_ERROR | Can't reach Plex right now. / Plex errored. |
 | PLEX_QUEUE_CREATE_FAILED | Couldn't create the queue. Nothing added. |
 | PLEX_QUEUE_STAGED | Made the queue, but the Apple TV didn't respond. Once it's awake say "start the queue" — no need to rebuild. (Recovery: `queue-start`, never re-`queue`.) |
@@ -67,6 +67,7 @@ Two rules:
 | PLEX_SMART_CONTAINER | That's a smart collection/playlist — edit its rule in the Plex app. |
 | PLEX_UNSUPPORTED | Not supported (shuffle/volume) — use the Plex app UI / TV remote. |
 | NOT_APPLIED (exit 6) | Plex accepted it but nothing actually changed — say so; follow the hint (e.g. idle `play` → `play-media` the queue's selected item's ratingKey from `queue-show`). |
+| DECODE_ERROR | Plex sent something that was not the JSON it promised, or a response over the size bound. Report it — do not retry. |
 | INTERNAL | plexctl bug — surface the message, suggest `debug`. |
 
 Success envelopes may carry `warnings` (e.g. PLEX_STATE_SAVE_FAILED). Mention a warning only if it affects what the user does next.
@@ -109,11 +110,9 @@ Table formats (two shapes only), the On Deck curated-list lifecycle, and the `q`
 
 ---
 
-## Personalisation (local-only)
+## Local files
 
-<!-- fenced:start -->
-> Local-only; ships empty. Record machine-specific preferences (viewing schedule, dictation habits, default watched/unwatched lens) between these markers in the installed copy at `~/.claude/skills/plex/SKILL.md`. The installed (NUC) copy is canonical: generic edits land there first and flow here with this section emptied; personal content never comes back here.
-<!-- fenced:end -->
+This repo copy is canonical for everything above: generic edits land here and are copied to `~/.claude/skills/plex/SKILL.md`. Three files in the installed skill directory are local-only and never flow back: `PERSONAL.md` (machine-specific preferences), `LESSONS.md` (the self-improvement log) and `INCIDENTS.md` (raw incident lines). Read `PERSONAL.md` first if it exists; its rules override defaults here. If it is missing, run with the defaults.
 
 ---
 

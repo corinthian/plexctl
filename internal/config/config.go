@@ -5,10 +5,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync/atomic"
 
 	toml "github.com/pelletier/go-toml/v2"
 
@@ -22,6 +23,18 @@ var Defaults = map[string]string{
 	"default_client": "Apple TV",
 	"client_id":      "plexctl-default",
 }
+
+// reads counts attempts to read config.toml. It exists so a test can assert
+// how often the file is touched: contract 2.7 narrows plexctl's change to
+// load frequency, and frequency is not observable any other way. Nothing in
+// the CLI reads it.
+var reads atomic.Int64
+
+// Reads returns the number of config-file read attempts so far. Test-only.
+func Reads() int64 { return reads.Load() }
+
+// ResetReads zeroes the read counter. Test-only.
+func ResetReads() { reads.Store(0) }
 
 // Dir returns the plexctl config directory.
 func Dir() string {
@@ -46,12 +59,21 @@ func Path() string {
 func Load() jsonx.J {
 	m, err := TryLoad()
 	if err != nil {
-		output.FailErr(output.Err(output.CodeAuthRequired,
-			fmt.Sprintf("invalid config at %s: %v — run plexctl auth login", Path(), err)).
-			WithHint("run: plexctl auth login"))
-		return jsonx.J{} // reached only when output.Exit is a test seam
+		return FailUnusable(err)
 	}
 	return m
+}
+
+// FailUnusable is Load's failure half, split out so internal/app's lazily
+// loaded per-invocation config fails through exactly the same envelope. Every
+// config failure — a missing file, an unreadable one, a directory at the
+// path, unparseable TOML — stays PLEX_AUTH_REQUIRED at exit 5 (contract Part
+// 3, plexctl config rows, all "unchanged").
+func FailUnusable(err error) jsonx.J {
+	output.FailErr(output.Err(output.CodeAuthRequired,
+		fmt.Sprintf("invalid config at %s: %v — run plexctl auth login", Path(), err)).
+		WithHint("run: plexctl auth login"))
+	return jsonx.J{} // reached only when output.Exit is a test seam
 }
 
 // TryLoad parses config.toml without Load's print-and-exit failure mode.
@@ -59,10 +81,20 @@ func Load() jsonx.J {
 // nil map, non-nil error, instead of aborting — auth login's config-merge
 // step needs to tolerate and repair a corrupt file, which Load's abort
 // would defeat (running login to fix a bad config would itself abort).
+//
+// Only os.ErrNotExist is "absent". Every other read error — a permissions
+// or I/O failure on a file that may be perfectly valid — is returned, not
+// flattened to an empty map: login merges onto TryLoad's result and saves
+// through a rename, so "unreadable" reported as "absent" silently destroys
+// every unmanaged key the file held.
 func TryLoad() (jsonx.J, error) {
+	reads.Add(1)
 	b, err := os.ReadFile(Path())
 	if err != nil {
-		return jsonx.J{}, nil
+		if errors.Is(err, os.ErrNotExist) {
+			return jsonx.J{}, nil
+		}
+		return nil, err
 	}
 	var m map[string]any
 	if err := toml.Unmarshal(b, &m); err != nil {
@@ -86,7 +118,14 @@ func StringOr(cfg jsonx.J, key, def string) string {
 // Require mirrors config.require: falsy value → print the standard error and
 // exit 1.
 func Require(key string) string {
-	v := Load()[key]
+	return RequireFrom(Load(), key)
+}
+
+// RequireFrom is Require against a config that has already been loaded, so
+// internal/app can satisfy a Require from its one memoised read without
+// reading the file again. The envelope is unchanged.
+func RequireFrom(cfg jsonx.J, key string) string {
+	v := cfg[key]
 	if !jsonx.Truthy(v) {
 		output.FailErr(output.Err(output.CodeAuthRequired,
 			fmt.Sprintf("missing config key: %s — run plexctl auth login", key)).
@@ -96,17 +135,33 @@ func Require(key string) string {
 	return jsonx.AsStr(v)
 }
 
-// KV preserves write order — Python dicts keep insertion order, so the saved
-// file's key order is part of the observable format.
+// KV is one config key and its value. V is `any` so a value keeps the TOML
+// type it was loaded with: a numeric `timeout = 10` that round-trips through
+// login stays an integer instead of being restringed.
 type KV struct {
-	K, V string
+	K string
+	V any
 }
 
-// Save writes key = "value" lines with the same escaping as config.save
-// (backslashes and double quotes), via temp+rename like every other writer
-// in this codebase (queuestate.writeAll, the commandID counter) — config.toml
-// is read unlocked by every command, so a direct in-place write left a
-// window where a concurrent Load could see a truncated or partial file.
+// Save encodes the pairs with the TOML marshaller rather than formatting
+// `key = "value"` lines by hand. The hand-rolled writer escaped backslashes
+// and double quotes only, so any other TOML-significant byte in a value —
+// a newline in a client name being the reachable case — produced a file the
+// CLI could no longer parse, bricking every later command until the user
+// hand-repaired it.
+//
+// Key order is now the encoder's, not the caller's. Nothing but plexctl
+// reads config.toml, so order is cosmetic; the encoder writes scalars ahead
+// of sub-tables, which is what TOML validity requires anyway.
+//
+// The write is temp+rename like every other writer in this codebase
+// (queuestate.writeAll, the commandID counter) — config.toml is read
+// unlocked by every command, so a direct in-place write left a window where
+// a concurrent Load could see a truncated or partial file. The temp name is
+// generated by os.CreateTemp rather than the fixed config.toml.tmp: the
+// fixed path was predictable, and os.WriteFile follows a symlink, so
+// anything else able to write in the config dir could plant one there and
+// have the file holding the Plex token land on a target of its choosing.
 func Save(pairs []KV) error {
 	if err := os.MkdirAll(Dir(), 0o700); err != nil {
 		return err
@@ -115,19 +170,46 @@ func Save(pairs []KV) error {
 	// the only token-writing path — this is the one place that needs to
 	// cover the upgrade case from an older, world-readable config dir.
 	_ = os.Chmod(Dir(), 0o700)
-	var b strings.Builder
+	doc := make(map[string]any, len(pairs))
 	for _, p := range pairs {
-		esc := strings.ReplaceAll(p.V, `\`, `\\`)
-		esc = strings.ReplaceAll(esc, `"`, `\"`)
-		b.WriteString(p.K + ` = "` + esc + `"` + "\n")
+		doc[p.K] = p.V
 	}
-	tmp := Path() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+	encoded, err := toml.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(Dir(), "config.toml.*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	renamed := false
+	// Load-bearing, not defensive: every exit below the rename must take the
+	// temp file with it, or a failed Save litters the config dir with
+	// token-bearing files.
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmp)
+		}
+	}()
+	// CreateTemp opens O_EXCL with mode 0600, but that mode is umask-
+	// filtered; the explicit Chmod forces 0600 regardless, the same guarantee
+	// the Chmod on the final path gives.
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(encoded); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, Path()); err != nil {
 		return err
 	}
+	renamed = true
 	// WriteFile's perm is subject to umask; chmod forces 0600 regardless,
 	// matching Python's unconditional chmod(0o600).
 	return os.Chmod(Path(), 0o600)
