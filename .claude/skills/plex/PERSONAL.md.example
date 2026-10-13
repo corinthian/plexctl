@@ -1,20 +1,26 @@
 # plex skill — PERSONAL.md
 
-Local to this machine only. Copy to `~/.claude/skills/plex/PERSONAL.md` and fill in. Never committed to the `plexctl` repo (gitignored). Rules here override SKILL.md defaults.
+Local to this machine only. Copy to `~/.claude/skills/plex/PERSONAL.md` and edit. Never committed to the `plexctl` repo (gitignored). Rules here override SKILL.md defaults. Everything below is a worked example: keep what fits your household, change the values, delete the rest. Only the playlist key is required.
 
 ## Required
 
-- **Up Next Tonight playlist ratingKey:** `<RATING_KEY>` — from `plexctl playlist list`. If the playlist does not exist yet, `plexctl playlist create "Up Next Tonight" <KEY>` and record the key here.
+- **Up Next Tonight playlist ratingKey:** `<RATING_KEY>`, from `plexctl playlist list` (title "Up Next Tonight"). If the playlist doesn't exist yet, `plexctl playlist create "Up Next Tonight" <KEY>` and record the key here. Never create a second one.
 
-## Evening planning (optional — SKILL.md defaults apply when unset)
+## Evening planning
 
-- **Evening start time:** 6:00 pm — anchor for the `Starts` column.
-- **Target evening length:** ~3h — suggestions aim here; mention once when a list runs well past it.
-- **Slot habits:** e.g. "Show X usually opens the night", "films after 8 pm".
-- **Rotation staples:** shows that belong in most nights' suggestions.
-- **Movie-night shape:** e.g. "double feature, older film first".
+- **Evening start time:** 6:00 pm, the anchor for the `Starts` column. A per-night override ("starting at 8 tonight") applies to that night only; a standing change ("from now on we start at 7") gets written here.
+- **Target evening length:** about 3h to 3h 30m. Mention it in one clause if a list runs well past about 10 pm; never trim on that basis.
+- **Slot habits:**
+  - "Columbo usually opens the night."
+  - Dramas the user is partway through tend to come early, right after or instead of the opener.
+  - "No new dramas" means only dramas the user is already partway through.
+- **Rotation staples:** Columbo, Forensic Files, Taskmaster, Grand Designs. For "TV tonight" with no names given, favour the staples that have gone longest since last watched (from `plexctl history`). Short shows (~20m) can be paired or slotted between longer episodes.
+- **Movie-night shape (soft):**
+  - Friday or Saturday double feature from the evening start: a newer film first, then an older black-and-white classic.
+  - Strong contrast between the halves (e.g. a bleak drama, then pulpy fun).
+  - The order sometimes flips, so offer the pair without insisting on the order or excluding other picks.
 
-## Other local rules (optional)
+## Other local rules
 
-- Rating destination (Plex only, Trakt via scrobbler, etc.).
-- Per-show language defaults (e.g. "Dark → deu").
+- **Rating destination:** Plex only, via `plexctl rate N RATING_KEY`. A scrobbler carries ratings on to Trakt; never also write to Trakt (double-post) and never ask which service. Rating a title that's queued but not finished is normal; don't query it.
+- **Per-show language defaults:** e.g. "Dark → deu", "anime → jpn".
