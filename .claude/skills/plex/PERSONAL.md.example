@@ -1,0 +1,20 @@
+# plex skill — PERSONAL.md
+
+Local to this machine only. Copy to `~/.claude/skills/plex/PERSONAL.md` and fill in. Never committed to the `plexctl` repo (gitignored). Rules here override SKILL.md defaults.
+
+## Required
+
+- **Up Next Tonight playlist ratingKey:** `<RATING_KEY>` — from `plexctl playlist list`. If the playlist does not exist yet, `plexctl playlist create "Up Next Tonight" <KEY>` and record the key here.
+
+## Evening planning (optional — SKILL.md defaults apply when unset)
+
+- **Evening start time:** 6:00 pm — anchor for the `Starts` column.
+- **Target evening length:** ~3h — suggestions aim here; mention once when a list runs well past it.
+- **Slot habits:** e.g. "Show X usually opens the night", "films after 8 pm".
+- **Rotation staples:** shows that belong in most nights' suggestions.
+- **Movie-night shape:** e.g. "double feature, older film first".
+
+## Other local rules (optional)
+
+- Rating destination (Plex only, Trakt via scrobbler, etc.).
+- Per-show language defaults (e.g. "Dark → deu").
