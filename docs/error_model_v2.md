@@ -2,7 +2,7 @@
 
 Status: FINAL for the v2 migration. Everything in Phases 1–4 executes this document. If an implementation task surfaces a case this doc doesn't cover, STOP and escalate — do not improvise a code or exit class.
 
-Inputs: `docs/error_inventory.md` (P0.1, every emission site), `docs/skill_compensations.md` (P0.2, every skill rule being absorbed). Reference: traktctl v1.1.0 `internal/output/output.go`.
+Inputs: `docs/error_inventory.md` (P0.1, every emission site; removed after v2, read it at `2e458fa`), `docs/skill_compensations.md` (P0.2, every skill rule being absorbed). Reference: traktctl v1.1.0 `internal/output/output.go`.
 
 ## 1. Contract
 
@@ -91,7 +91,7 @@ Family rule for Subtrakt: the auth code contains `_AUTH_` so its cross-tool clas
 
 ## 3. Migration mapping (v1 emission → v2)
 
-Keyed to `docs/error_inventory.md`. P2 agents follow this table mechanically; anything unlisted = STOP and escalate.
+Keyed to `docs/error_inventory.md` (removed after v2, read it at `2e458fa`). P2 agents follow this table mechanically; anything unlisted = STOP and escalate.
 
 - **auth.go** (13 sites): URL validation → `BAD_REQUEST`. Sign-in HTTP >= 400 / response-shape / non-JSON → `PLEX_AUTH_FAILED`. Sign-in transport (`classifyAuthTransport`) → `TRANSPORT_TIMEOUT`/`TRANSPORT_FAILED`/`CLOUD_UNREACHABLE` per class. PMS-verify failures → `TRANSPORT_FAILED` (transport) or `PLEX_AUTH_FAILED` (HTTP >= 400, wrong URL/token). Config write failure → `INTERNAL`.
 - **config.go** (2): both → `PLEX_AUTH_REQUIRED`, exit 5.
