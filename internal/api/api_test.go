@@ -527,3 +527,53 @@ func TestFormatHTTPErrorStripsControlChars(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestRegisterDeviceSendsVersionHeaders(t *testing.T) {
+	var gotPath string
+	var gotHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHeaders = r.Header.Clone()
+		w.Write([]byte(`{"id": 1}`))
+	}))
+	defer srv.Close()
+	testutil.Setup(t, srv.URL)
+
+	// Explicit credentials, not the config's: login calls this with a token
+	// the memoised config has not seen.
+	if err := api.RegisterDeviceAt(srv.URL, "fresh-token", "plexctl-fresh"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v2/user" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	want := map[string]string{
+		"X-Plex-Product":           "plexctl",
+		"X-Plex-Version":           api.Version,
+		"X-Plex-Platform":          "Go",
+		"X-Plex-Token":             "fresh-token",
+		"X-Plex-Client-Identifier": "plexctl-fresh",
+	}
+	for k, v := range want {
+		if gotHeaders.Get(k) != v {
+			t.Fatalf("%s = %q, want %q", k, gotHeaders.Get(k), v)
+		}
+	}
+}
+
+func TestRegisterDeviceReturnsHTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", 401)
+	}))
+	defer srv.Close()
+	testutil.Setup(t, srv.URL)
+
+	err := api.RegisterDeviceAt(srv.URL, "bad-token", "plexctl-test")
+	var e *api.Error
+	if !errors.As(err, &e) || e.Status != 401 {
+		t.Fatalf("want *api.Error status 401, got %#v", err)
+	}
+	if c := api.Classify(e, api.TargetCloud); c.Code != output.CodeAuthRequired {
+		t.Fatalf("code = %s, want %s", c.Code, output.CodeAuthRequired)
+	}
+}

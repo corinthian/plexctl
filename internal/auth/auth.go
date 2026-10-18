@@ -347,5 +347,12 @@ func Login() {
 	if configBackup != "" {
 		result["configBackup"] = configBackup
 	}
+	// Best effort: the token is already saved, so a failed refresh of the
+	// plex.tv device record is a warning, never a login failure.
+	if err := api.RegisterDevice(token, clientID); err != nil {
+		e := api.AsError(err)
+		output.Warn(result, api.Classify(e, api.TargetCloud).Code,
+			"plex.tv device record not refreshed: "+e.Message, "run: plexctl auth register")
+	}
 	output.PrintOrFail(result)
 }

@@ -31,6 +31,12 @@ var Version = "2.0.1"
 
 const plexTV = "https://plex.tv"
 
+// plexTVClients serves /api/v2/user, the one plex.tv call found to refresh
+// this client's device record (product, version, platform). devices.json and
+// sign-in do not, so without it the record keeps whatever version first
+// registered the client ID.
+const plexTVClients = "https://clients.plex.tv"
+
 // DefaultTimeout is the timeout used when no source supplies one. The
 // resolution itself lives on the invocation's App (internal/app): it is
 // per-invocation state, lazily resolved and memoised there alongside the
@@ -196,9 +202,18 @@ func classifyTransport(err error) *Error {
 // The return is any because plex.tv endpoints return JSON arrays; PMS
 // endpoints return objects.
 func Request(method, base, path string, params url.Values) (any, error) {
-	cfg := app.Current().Config()
 	token := app.Current().Require("token")
-	clientID := config.StringOr(cfg, "client_id", config.Defaults["client_id"])
+	return requestAs(method, base, path, params, token, ClientID())
+}
+
+// ClientID is the configured X-Plex-Client-Identifier.
+func ClientID() string {
+	return config.StringOr(app.Current().Config(), "client_id", config.Defaults["client_id"])
+}
+
+// requestAs is Request with explicit credentials, for callers that hold a
+// token the memoised config has not seen yet (auth login, just after Save).
+func requestAs(method, base, path string, params url.Values, token, clientID string) (any, error) {
 	req, err := http.NewRequest(method, BuildURL(base, path, params), nil)
 	if err != nil {
 		return nil, &Error{Message: "request failed: " + err.Error(), Kind: "error"}
@@ -358,6 +373,18 @@ func Delete(path string, params url.Values) jsonx.J {
 // PlexTVGet hits plex.tv; the response may be a JSON array (devices.json).
 func PlexTVGet(path string, params url.Values) any {
 	return ExitOnError("GET", plexTV, path, params, "plex.tv ")
+}
+
+// RegisterDevice refreshes plex.tv's device record for clientID so the
+// account's Authorized Devices list shows this build's version. The response
+// (the account's user object) is discarded.
+func RegisterDevice(token, clientID string) error {
+	return registerDeviceAt(plexTVClients, token, clientID)
+}
+
+func registerDeviceAt(base, token, clientID string) error {
+	_, err := requestAs("GET", base, "/api/v2/user", nil, token, clientID)
+	return err
 }
 
 // TryGet / TryPut / TryDelete raise instead of print-and-exit, for callers
