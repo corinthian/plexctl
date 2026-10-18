@@ -720,8 +720,9 @@ func TestRemoveItemRefusesSmartCollection(t *testing.T) {
 	}
 }
 
-// TestRenameRefusesSmartCollection pins a gap in error_inventory.md (row 5
-// there claims Rename has no local ok:false branch — the code disagrees):
+// TestRenameRefusesSmartCollection pins a gap in docs/error_inventory.md at
+// 2e458fa (row 5 there claims Rename has no local ok:false branch — the code
+// disagrees):
 // Rename does consult isSmart and must refuse with the same
 // PLEX_SMART_CONTAINER code as add/remove.
 func TestRenameRefusesSmartCollection(t *testing.T) {

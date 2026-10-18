@@ -2,7 +2,7 @@
 
 Status: FINAL for the v2 migration. Everything in Phases 1–4 executes this document. If an implementation task surfaces a case this doc doesn't cover, STOP and escalate — do not improvise a code or exit class.
 
-Inputs: `docs/error_inventory.md` (P0.1, every emission site), `docs/skill_compensations.md` (P0.2, every skill rule being absorbed). Reference: traktctl v1.1.0 `internal/output/output.go`.
+Inputs: `docs/error_inventory.md` (P0.1, every emission site; removed after v2, read it at `2e458fa`), `docs/skill_compensations.md` (P0.2, every skill rule being absorbed). Reference: traktctl v1.1.0 `internal/output/output.go`.
 
 ## 1. Contract
 
@@ -31,7 +31,7 @@ Inputs: `docs/error_inventory.md` (P0.1, every emission site), `docs/skill_compe
 
 `error.code` from the closed enumeration in §2 — **every** `ok:false` carries one; there is no uncoded error in v2. `message` stays human-readable free text (unstable, never match on it). `http_status` present only when an upstream HTTP status drove the failure. `hint` present whenever a concrete next action exists, and names the exact command. `data` holds machine-usable recovery/context fields — the v1 ad-hoc envelope keys (`staged`, `clientUnreachable`, `clientEngaged`, `partialQueueID`, `rollbackAttempted`, `added`) move here and appear ONLY under `data` on error envelopes.
 
-- **Warnings on success:** a success envelope may carry `"warnings": [{"code", "message", "hint"}]` for non-fatal infrastructure failures that must not read as command failure. Sole v2 producer: `PLEX_STATE_SAVE_FAILED` (the v1 `stateSaved: false` key — queue worked, local state record didn't write). `stateSaved` disappears as a bare key.
+- **Warnings on success:** a success envelope may carry `"warnings": [{"code", "message", "hint"}]` for non-fatal infrastructure failures that must not read as command failure. Producers: `PLEX_STATE_SAVE_FAILED` (the v1 `stateSaved: false` key — queue worked, local state record didn't write; `stateSaved` disappears as a bare key), and `auth login`'s plex.tv device-record refresh, which runs after the token is saved. A failed refresh is a warning, never a login failure: its `code` is the cloud classification of the failure (`CLOUD_UNREACHABLE`, `PLEX_AUTH_REQUIRED`, `PLEX_HTTP_ERROR`, …), its message starts `plex.tv device record not refreshed:`, and its hint is `run: plexctl auth register`. `plexctl auth register` runs the same refresh alone and reports a failure as an ordinary `ok:false` envelope with the same classification.
 - **Stream: errors go to stdout,** same as success. This matches what traktctl actually does (its `EmitError` writes to the Out stream; the Err writer is an unused seam). The hardening plan's "stderr" line followed the Subtrakt spec's aspiration, not traktctl reality — match-the-reference wins, and the Subtrakt spec gets corrected in P4.2. Keep an `output.Stderr` seam for a future dual-stream move if traktctl ever makes one.
 - NDJSON emission (`--ndjson` rows + summary) unchanged.
 
@@ -91,7 +91,7 @@ Family rule for Subtrakt: the auth code contains `_AUTH_` so its cross-tool clas
 
 ## 3. Migration mapping (v1 emission → v2)
 
-Keyed to `docs/error_inventory.md`. P2 agents follow this table mechanically; anything unlisted = STOP and escalate.
+Keyed to `docs/error_inventory.md` (removed after v2, read it at `2e458fa`). P2 agents follow this table mechanically; anything unlisted = STOP and escalate.
 
 - **auth.go** (13 sites): URL validation → `BAD_REQUEST`. Sign-in HTTP >= 400 / response-shape / non-JSON → `PLEX_AUTH_FAILED`. Sign-in transport (`classifyAuthTransport`) → `TRANSPORT_TIMEOUT`/`TRANSPORT_FAILED`/`CLOUD_UNREACHABLE` per class. PMS-verify failures → `TRANSPORT_FAILED` (transport) or `PLEX_AUTH_FAILED` (HTTP >= 400, wrong URL/token). Config write failure → `INTERNAL`.
 - **config.go** (2): both → `PLEX_AUTH_REQUIRED`, exit 5.

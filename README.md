@@ -15,6 +15,8 @@ Requires Go 1.26+. No runtime dependencies.
 
 Codesigning is ad-hoc (`codesign -s -`). A failure warns and continues by default; set `PLEXCTL_RELEASE=1` to make it fatal so a release never ships unsigned.
 
+After installing a new binary on a host, run `plexctl auth register` there. plex.tv's Authorized Devices entry keeps the version that first registered the client ID until this runs; nothing else updates it. Each host has its own client ID and token, so each host needs its own run. Success prints `{"ok":true,"clientId":"…","version":"…"}`.
+
 ## Setup
 
 ```

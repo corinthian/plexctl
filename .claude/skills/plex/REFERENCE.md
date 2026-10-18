@@ -53,6 +53,7 @@ Empty states: `Nothing on deck yet.` (playlist empty), `Nothing found for "<q>".
 | set track (single) | `plexctl set-audio KEY [--language X | --stream-id N]`, `set-subtitle … [--off]` |
 | set track (bulk) | `plexctl set-audio --show "S" --language X [--season N|--all-seasons] [--only-non-eng] --dry-run` first, confirm, then real run |
 | collections / playlists | `plexctl collection|playlist list/show/create/add/remove/rename/delete[/clear]` |
+| refresh plex.tv device record (after a deploy) | `plexctl auth register` → `{ok, clientId, version}` |
 | discovery | `plexctl commands` (JSON tree) |
 
 ### Client (unavailable — PLEX_CLIENT_INACTIVE)
