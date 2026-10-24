@@ -115,3 +115,32 @@ Description: First sentence of summary.
 (movies: omit Show, Title becomes `Rocky (2021)`). Idle → `Nothing playing.` Transport confirmations: `Paused.` `Playing.` `Stopped.` `Skipped.` `Back.` `Seeked to mm:ss.`
 
 Flag fact: `play-media` takes a `ratingKey`, not a `playQueueItemID` (different ID space; passing one returns HTTP 400).
+
+---
+
+## Client control (unavailable)
+
+Kept for if Plex restores Companion on the Apple TV. **Do not use while client commands return PLEX_CLIENT_INACTIVE.** If they start working again, tell the user before switching any behaviour back.
+
+- **Queue-then-pause.** `queue` auto-starts playback; immediately `plexctl pause` unless the user asked to watch now. The resulting paused-on-item-1 state is your own doing — never report it as an anomaly.
+- **`play` only resumes.** Starting a loaded-but-idle queue: `play` exits 6 NOT_APPLIED; respond by `play-media <ratingKey of queue's selected item>` (from `queue-show`), then confirm playing.
+- **Seek:** verify nothing — the result's `playState` says where playback landed; re-issue `play` only if it was playing before and `playState` says paused.
+- **Queue rows carry no ratingKey** — resolve each with `search "<title>" --type episode --json`, confirming the match on `duration`, before reading its `viewCount`.
+- **Watched target in the active queue** → after marking watched, offer removal. Never auto-remove.
+- **Unexpected idle after `ok:true`** is ambiguous: report the observation and ASK. Wedge language and an INCIDENTS.md line require an actual error code (PLEX_CLIENT_UNREACHABLE, PLEX_PLAYBACK_NOT_STARTED, NOT_APPLIED). Warn before a commit clobbers an actively playing or paused item, in one clause.
+- `now-playing` renders exactly per REFERENCE's template.
+
+| Code | Say |
+|---|---|
+| PLEX_NOTHING_PLAYING | Nothing playing — give me a row number. |
+| PLEX_SEEK_FAILED | Seek stumbled (check `data.seeked`/`repaused` for how far it got). |
+| PLEX_CLIENT_UNKNOWN / _AMBIGUOUS | Client problem — say which per the message; recovery per hint. |
+| PLEX_CLIENT_UNREACHABLE | Apple TV isn't responding. If Plex is open on it, relaunch the app. Don't retry until the user says it's back. |
+| PLEX_QUEUE_CREATE_FAILED | Couldn't create the queue. Nothing added. |
+| PLEX_QUEUE_STAGED | Made the queue, but the Apple TV didn't respond. Once it's awake say "start the queue". (Recovery: `queue-start`, never re-`queue`.) |
+| PLEX_QUEUE_CONFLICT | Made the queue, but one's already active and the device isn't answering. (Recovery: re-run `queue`, NOT `queue-start`.) |
+| PLEX_PLAYBACK_NOT_STARTED | The Apple TV accepted it but nothing started. Relaunch Plex on it — recovery per hint. |
+| PLEX_NO_QUEUE | Nothing queued yet — queue something first. |
+| PLEX_QUEUE_PARTIAL | Added the first N, then hit an issue. Try again with the rest (`data.added`). |
+
+Incidents (client era): PLEX_CLIENT_UNREACHABLE during queue operations also gets an INCIDENTS.md line.
