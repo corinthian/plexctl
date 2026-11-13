@@ -13,6 +13,9 @@ argument-hint: "[voice phrase | command | query]"
 allowed-tools:
   - "Bash(plexctl:*)"
   - "Bash(jq:*)"
+  - "Bash(traktctl sync history get:*)"
+  - "Bash(traktctl sync history add:*)"
+  - "Bash(traktctl sync ratings add:*)"
 ---
 
 # Plex Skill (v3 — requires plexctl ≥ 2.0.1)
@@ -23,7 +26,7 @@ Goal: smooth find / line-up / schedule UX. Hide plexctl noise. Never surface int
 
 **Client control is unavailable.** Plex for Apple TV 2026.18.0 dropped Plex Companion; every client-driving command (`now-playing`, `play`, `pause`, `stop`, `seek`, `next`, `prev`, `play-media`, `play-latest` without `--key-only`, `queue`, `queue-start`, `queue-show`, all `queue-*`, and `context`, which bundles now-playing) returns PLEX_CLIENT_INACTIVE. Never run them, never retry, never tell the user to relaunch the app or find a setting. The old client-control rules live in REFERENCE.md → "Client control (unavailable)", for if Companion returns.
 
-**Version gate:** on the first plexctl call of a session, if behavior looks pre-2.0.0 (a flat `"error": "text"` string instead of an error object) run `plexctl --version`; below 2.0.0 → stop and say: "plexctl is below 2.0.0 — upgrade the binary to 2.0.0 or later before using this skill." Do not attempt workarounds for older binaries.
+**Version gate:** on the first plexctl call of a session, if behavior looks pre-2.0.0 (a flat `"error": "text"` string instead of an error object) run `plexctl --version`; below 2.0.1 → stop and say: "plexctl is below 2.0.1 — upgrade the binary to 2.0.1 or later before using this skill." Do not attempt workarounds for older binaries.
 
 ---
 
@@ -38,7 +41,7 @@ Goal: smooth find / line-up / schedule UX. Hide plexctl noise. Never surface int
   - Neither source vetoes the other on its own question. `history` missing an item never overrides `viewCount >= 1`; `viewCount` never answers "recently".
   - **`skipCount` is not evidence either way.** An episode watched through and then credit-skipped to advance records `viewCount: 1` with `skipCount: 1` — that is a *completed* episode, the normal signature. Never raise it as doubt. (`skipCount` is often absent from the payload entirely.)
   - Never infer per-item watch state from playlist position, `continue-watching`, show-level `skipCount` / `viewedLeafCount` arithmetic, or memory. (Show-*row* Watched columns still use `unwatchedLeaves` per REFERENCE — that is a different question.)
-- **Always pass a RATING_KEY** to `watched`, `unwatched` and `rate`. With no key they target "the currently playing item", which needs a controllable client and now always fails.
+- **Always pass a RATING_KEY** to `watched`, `unwatched` and `rate`. With no key they target "the currently playing item", which needs a controllable client and now always fails. Where ratings go is a local choice: if PERSONAL.md sends them elsewhere (e.g. Trakt), follow it and don't run `rate`.
 
 ## The Error Contract
 
@@ -130,7 +133,7 @@ Table formats (two shapes only, plus the `Starts` column), the On Deck playlist 
 
 This repo copy is canonical for everything above: generic edits land here and are copied to `~/.claude/skills/plex/SKILL.md`. Three files in the installed skill directory are local-only and never flow back: `PERSONAL.md` (machine-specific preferences), `LESSONS.md` (the self-improvement log) and `INCIDENTS.md` (raw incident lines). Read `PERSONAL.md` first if it exists; its rules override defaults here. If it is missing, run with the defaults.
 
-`PERSONAL.md.example` in this directory lists every value the skill reads from `PERSONAL.md`. On a new machine, copy it to `~/.claude/skills/plex/PERSONAL.md` and fill it in. **The playlist ratingKey is required** — without it, the first `/plex` run must `playlist list`, find "Up Next Tonight" (or create it), and record the key in `PERSONAL.md` before doing anything else; never create a second playlist because the key is unrecorded.
+`PERSONAL.md.example` in the plexctl repo (`.claude/skills/plex/`) lists every value the skill reads from `PERSONAL.md`. On a new machine, copy it to `~/.claude/skills/plex/PERSONAL.md` and fill it in. **The playlist ratingKey is required** — without it, the first `/plex` run must `playlist list`, find "Up Next Tonight" (or create it), and record the key in `PERSONAL.md` before doing anything else; never create a second playlist because the key is unrecorded.
 
 ### Skill rules vs local customisations
 

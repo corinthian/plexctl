@@ -48,7 +48,7 @@ Empty states: `Nothing on deck yet.` (playlist empty), `Nothing found for "<q>".
 | unwatched films / library scan | `plexctl library list --section N [--unwatched] [--type T] [--sort addedAt:desc]` → `.items[]` (ratingKey, title, year, duration, viewCount, addedAt) |
 | On Deck playlist | `plexctl playlist show|add|remove|clear KEY …` (see below) |
 | history / continue | `plexctl history --limit N` (`.history[]`) / `plexctl continue-watching` |
-| watch state / rating | `plexctl watched|unwatched KEY`, `plexctl rate N KEY` (0–10; 0 = unrate) — always pass KEY |
+| watch state / rating | `plexctl watched|unwatched KEY`, `plexctl rate N KEY` (0–10; 0 = unrate) — always pass KEY; skip `rate` if PERSONAL.md sends ratings elsewhere |
 | audio audit | `plexctl audit-audio "SHOW" [--language eng] [--season N]` |
 | set track (single) | `plexctl set-audio KEY [--language X | --stream-id N]`, `set-subtitle … [--off]` |
 | set track (bulk) | `plexctl set-audio --show "S" --language X [--season N|--all-seasons] [--only-non-eng] --dry-run` first, confirm, then real run |
