@@ -13,6 +13,9 @@ argument-hint: "[voice phrase | command | query]"
 allowed-tools:
   - "Bash(plexctl:*)"
   - "Bash(jq:*)"
+  - "Bash(traktctl sync history get:*)"
+  - "Bash(traktctl sync history add:*)"
+  - "Bash(traktctl sync ratings add:*)"
 ---
 
 # Plex Skill (v3 — requires plexctl ≥ 2.0.1)
@@ -21,9 +24,9 @@ Goal: smooth find / line-up / schedule UX. Hide plexctl noise. Never surface int
 
 **On Deck is a server playlist.** "Up Next Tonight" (its ratingKey is recorded in PERSONAL.md) is the single source of truth for what's lined up. The user plays it from the Plex app with the TV remote. Building, editing, reordering and checking status all happen on that playlist with server-only plexctl commands — fully supported, no client involvement. REFERENCE.md → "On Deck (Up Next Tonight)" has the lifecycle.
 
-**Client control is unavailable.** Plex for Apple TV 2026.18.0 dropped Plex Companion; every client-driving command (`now-playing`, `play`, `pause`, `stop`, `seek`, `next`, `prev`, `play-media`, `play-latest` without `--key-only`, `queue`, `queue-start`, `queue-show`, all `queue-*`, and `context`, which bundles now-playing) returns PLEX_CLIENT_INACTIVE. Never run them, never retry, never tell the user to relaunch the app or find a setting. The old client-control rules are kept in the appendix at the end, for if Companion returns.
+**Client control is unavailable.** Plex for Apple TV 2026.18.0 dropped Plex Companion; every client-driving command (`now-playing`, `play`, `pause`, `stop`, `seek`, `next`, `prev`, `play-media`, `play-latest` without `--key-only`, `queue`, `queue-start`, `queue-show`, all `queue-*`, and `context`, which bundles now-playing) returns PLEX_CLIENT_INACTIVE. Never run them, never retry, never tell the user to relaunch the app or find a setting. The old client-control rules live in REFERENCE.md → "Client control (unavailable)", for if Companion returns.
 
-**Version gate:** on the first plexctl call of a session, if behavior looks pre-2.0.0 (a flat `"error": "text"` string instead of an error object) run `plexctl --version`; below 2.0.0 → stop and say: "plexctl is below 2.0.0 — upgrade the binary to 2.0.0 or later before using this skill." Do not attempt workarounds for older binaries.
+**Version gate:** on the first plexctl call of a session, if behavior looks pre-2.0.0 (a flat `"error": "text"` string instead of an error object) run `plexctl --version`; below 2.0.1 → stop and say: "plexctl is below 2.0.1 — upgrade the binary to 2.0.1 or later before using this skill." Do not attempt workarounds for older binaries.
 
 ---
 
@@ -38,7 +41,7 @@ Goal: smooth find / line-up / schedule UX. Hide plexctl noise. Never surface int
   - Neither source vetoes the other on its own question. `history` missing an item never overrides `viewCount >= 1`; `viewCount` never answers "recently".
   - **`skipCount` is not evidence either way.** An episode watched through and then credit-skipped to advance records `viewCount: 1` with `skipCount: 1` — that is a *completed* episode, the normal signature. Never raise it as doubt. (`skipCount` is often absent from the payload entirely.)
   - Never infer per-item watch state from playlist position, `continue-watching`, show-level `skipCount` / `viewedLeafCount` arithmetic, or memory. (Show-*row* Watched columns still use `unwatchedLeaves` per REFERENCE — that is a different question.)
-- **Always pass a RATING_KEY** to `watched`, `unwatched` and `rate`. With no key they target "the currently playing item", which needs a controllable client and now always fails.
+- **Always pass a RATING_KEY** to `watched`, `unwatched` and `rate`. With no key they target "the currently playing item", which needs a controllable client and now always fails. Where ratings go is a local choice: if PERSONAL.md sends them elsewhere (e.g. Trakt), follow it and don't run `rate`.
 
 ## The Error Contract
 
@@ -69,7 +72,7 @@ Two rules:
 | DECODE_ERROR | Plex sent something that was not the JSON it promised, or a response over the size bound. Report it — do not retry. |
 | INTERNAL | plexctl bug — surface the message, suggest `debug`. |
 
-Client-only codes (PLEX_NOTHING_PLAYING, PLEX_SEEK_FAILED, PLEX_CLIENT_UNKNOWN/_AMBIGUOUS/_UNREACHABLE, PLEX_QUEUE_*, PLEX_PLAYBACK_NOT_STARTED, PLEX_NO_QUEUE) are in the appendix.
+Client-only codes (PLEX_NOTHING_PLAYING, PLEX_SEEK_FAILED, PLEX_CLIENT_UNKNOWN/_AMBIGUOUS/_UNREACHABLE, PLEX_QUEUE_*, PLEX_PLAYBACK_NOT_STARTED, PLEX_NO_QUEUE) are in REFERENCE.md → "Client control (unavailable)".
 
 Success envelopes may carry `warnings` (e.g. PLEX_STATE_SAVE_FAILED, or a failed device-record refresh on `auth login`). Mention a warning only if it affects what the user does next.
 
@@ -78,7 +81,7 @@ Success envelopes may carry `warnings` (e.g. PLEX_STATE_SAVE_FAILED, or a failed
 - **Row numbers, not IDs.** Any list with `ratingKey`/`playlistItemID` gets a `#` column; keep the #→ID map in context for "drop #2", "one and four". Debug mode appends ID columns.
 - **Compound titles split first.** A dictated phrase that joins titles with "and" ("Fallout and the Virtues, and After the First 48") is split into candidate titles *before* any lookup, and each one is resolved independently with its own `play-latest --unwatched --key-only "<clean title>"`. Never reuse a resolution obtained from the unsplit string, and never fall back to show-level `skipCount`/`viewedLeafCount` arithmetic for an unwatched count — a direct `--unwatched` query or per-episode `viewCount` is the only authority.
 - **Dictated show names.** When `--key-only` resolves to a show whose real name differs only cosmetically from what was said ("body in the basement" → "A Body in the Basement"), render the real name and carry on — no question. If it's a different series, flag it (see show-identity echo).
-- **The answer stands alone.** A confirmation is one line, or the table — nothing after it. A fully successful check-and-fix ("make sure X is set") is confirmed in one word or a short line — "Done." / "Done — 3 switched." Detail only on a failure or when asked. Never append what a rebuild displaced, that an episode advanced or got watched since last time, or that media has gone missing (a 404 on a previously-watched key and a null-runtime history row are expected downstream of the user deleting watched films — render the row blank and say nothing; investigate absence only if asked outright). Never state what's on deck unless it was asked *this turn* and queried *this turn* — a bare 👍 / "ok" / "thanks" gets no state report at all.
+- **The answer stands alone.** A confirmation is one line, or the table — nothing after it. A successful check-and-fix is "Done." or "Done — 3 switched." Detail only on a failure or when asked. Report only what this turn asked for: no side observations about what changed since last time, what a rebuild displaced, or media that is now missing (a 404 on a previously-watched key or a null-runtime history row follows the user deleting watched films — render the row blank). State what's on deck only when asked and queried this turn; a bare 👍 / "ok" / "thanks" gets no state report.
 - **`search` caps ~10 results** — for whole-show episode lists use `episodes "<show>" [--unwatched]`, not search. `"loose": true` hits are unconfirmed: "Closest I get is <Title> (<year>) — that it?"
 - **An empty search result is final.** Report "Nothing found" and STOP — never enumerate the library (`library list` scans) to double-check absence. One corrected-spelling retry is fine; expeditions are not.
 - **`durationNominal: true`** rows (shows): render `~43m typical` or blank, never a bare runtime, and no `Total:` line on tables containing them. Movie and episode durations are real.
@@ -130,7 +133,7 @@ Table formats (two shapes only, plus the `Starts` column), the On Deck playlist 
 
 This repo copy is canonical for everything above: generic edits land here and are copied to `~/.claude/skills/plex/SKILL.md`. Three files in the installed skill directory are local-only and never flow back: `PERSONAL.md` (machine-specific preferences), `LESSONS.md` (the self-improvement log) and `INCIDENTS.md` (raw incident lines). Read `PERSONAL.md` first if it exists; its rules override defaults here. If it is missing, run with the defaults.
 
-`PERSONAL.md.example` in this directory lists every value the skill reads from `PERSONAL.md`. On a new machine, copy it to `~/.claude/skills/plex/PERSONAL.md` and fill it in. **The playlist ratingKey is required** — without it, the first `/plex` run must `playlist list`, find "Up Next Tonight" (or create it), and record the key in `PERSONAL.md` before doing anything else; never create a second playlist because the key is unrecorded.
+`PERSONAL.md.example` in the plexctl repo (`.claude/skills/plex/`) lists every value the skill reads from `PERSONAL.md`. On a new machine, copy it to `~/.claude/skills/plex/PERSONAL.md` and fill it in. **The playlist ratingKey is required** — without it, the first `/plex` run must `playlist list`, find "Up Next Tonight" (or create it), and record the key in `PERSONAL.md` before doing anything else; never create a second playlist because the key is unrecorded.
 
 ### Skill rules vs local customisations
 
@@ -184,30 +187,3 @@ User invoked `/plex $ARGUMENTS`
 4. Evaluate reflection triggers; write/increment lessons.
 
 ---
-
-## Appendix — Client control (currently unavailable)
-
-Kept for if Plex restores Companion on the Apple TV. **Do not use while client commands return PLEX_CLIENT_INACTIVE.** If they start working again, tell the user before switching any behaviour back.
-
-- **Queue-then-pause.** `queue` auto-starts playback; immediately `plexctl pause` unless the user asked to watch now. The resulting paused-on-item-1 state is your own doing — never report it as an anomaly.
-- **`play` only resumes.** Starting a loaded-but-idle queue: `play` exits 6 NOT_APPLIED; respond by `play-media <ratingKey of queue's selected item>` (from `queue-show`), then confirm playing.
-- **Seek:** verify nothing — the result's `playState` says where playback landed; re-issue `play` only if it was playing before and `playState` says paused.
-- **Queue rows carry no ratingKey** — resolve each with `search "<title>" --type episode --json`, confirming the match on `duration`, before reading its `viewCount`.
-- **Watched target in the active queue** → after marking watched, offer removal. Never auto-remove.
-- **Unexpected idle after `ok:true`** is ambiguous: report the observation and ASK. Wedge language and an INCIDENTS.md line require an actual error code (PLEX_CLIENT_UNREACHABLE, PLEX_PLAYBACK_NOT_STARTED, NOT_APPLIED). Warn before a commit clobbers an actively playing or paused item, in one clause.
-- `now-playing` renders exactly per REFERENCE's template.
-
-| Code | Say |
-|---|---|
-| PLEX_NOTHING_PLAYING | Nothing playing — give me a row number. |
-| PLEX_SEEK_FAILED | Seek stumbled (check `data.seeked`/`repaused` for how far it got). |
-| PLEX_CLIENT_UNKNOWN / _AMBIGUOUS | Client problem — say which per the message; recovery per hint. |
-| PLEX_CLIENT_UNREACHABLE | Apple TV isn't responding. If Plex is open on it, relaunch the app. Don't retry until the user says it's back. |
-| PLEX_QUEUE_CREATE_FAILED | Couldn't create the queue. Nothing added. |
-| PLEX_QUEUE_STAGED | Made the queue, but the Apple TV didn't respond. Once it's awake say "start the queue". (Recovery: `queue-start`, never re-`queue`.) |
-| PLEX_QUEUE_CONFLICT | Made the queue, but one's already active and the device isn't answering. (Recovery: re-run `queue`, NOT `queue-start`.) |
-| PLEX_PLAYBACK_NOT_STARTED | The Apple TV accepted it but nothing started. Relaunch Plex on it — recovery per hint. |
-| PLEX_NO_QUEUE | Nothing queued yet — queue something first. |
-| PLEX_QUEUE_PARTIAL | Added the first N, then hit an issue. Try again with the rest (`data.added`). |
-
-Incidents (client era): PLEX_CLIENT_UNREACHABLE during queue operations also gets an INCIDENTS.md line.
